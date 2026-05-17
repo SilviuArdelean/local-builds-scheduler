@@ -1,6 +1,6 @@
-# Local Build Scheduler
+# Local Builds Scheduler
 
-A small, pragmatic build queue runner for developers working with large repositories and long-running builds.
+A small, pragmatic builds queue runner for developers working with large repositories and long-running builds.
 
 The goal is simple: run heavy local build jobs one after another, usually overnight, without wasting hardware resources by running multiple expensive builds in parallel.
 
