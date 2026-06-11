@@ -12,6 +12,7 @@ import argparse
 import sys
 
 from lbs import __version__
+from lbs.config import load_config, ConfigError
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -23,16 +24,26 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_validate(args: argparse.Namespace) -> None:
     """Handle the 'lbs validate <config>' subcommand."""
-    # TODO: implement YAML config validation
-    print("lbs validate: not implemented", file=sys.stderr)
-    sys.exit(1)
+    try:
+        load_config(args.config)
+        print("Configuration is valid.")
+        sys.exit(0)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
     """Handle the 'lbs list <config>' subcommand."""
-    # TODO: implement job listing from config file
-    print("lbs list: not implemented", file=sys.stderr)
-    sys.exit(1)
+    try:
+        config = load_config(args.config)
+        for job in config.jobs:
+            print(job.name)
+        sys.exit(0)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 
 def build_parser() -> argparse.ArgumentParser:
