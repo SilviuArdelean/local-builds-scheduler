@@ -1,0 +1,27 @@
+# Local Builds Scheduler (LBS) Sample Configuration
+# Use this as a template for your own builds.
+
+settings:
+  # If true, stop executing subsequent jobs if a job fails
+  stop_on_failure: false
+  # Directory where logs will be stored
+  log_dir: "logs"
+
+jobs:
+  - name: sample-job-1
+    # The directory where the commands will run.
+    # For this sample, we use the project root (which is guaranteed to exist).
+    cwd: "."
+    # Optional environment variables for the job
+    env:
+      BUILD_MODE: "debug"
+      VERBOSE: "1"
+    # Commands to execute in sequence
+    commands:
+      - "echo 'Running sample job 1'"
+      - "python --version"
+
+  - name: sample-job-2
+    cwd: "."
+    commands:
+      - "echo 'Running sample job 2'"
