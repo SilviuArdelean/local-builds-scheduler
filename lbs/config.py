@@ -1,4 +1,5 @@
 # Local Builds Scheduler
+# Copyright 2026 Silviu Ardelean
 # SPDX-License-Identifier: Apache-2.0
 """
 lbs.config – Configuration loader and validator.
@@ -20,6 +21,8 @@ class Settings:
     """Global scheduler settings."""
     stop_on_failure: bool = False
     log_dir: str = "logs"
+    verbose: bool = False
+
 
 
 @dataclass
@@ -147,6 +150,12 @@ def validate_config(path: str | Path) -> None:
                 raise ConfigError(
                     "'log_dir' setting must be a non-empty string")
 
+        if "verbose" in settings_data:
+            if not isinstance(settings_data["verbose"], bool):
+                raise ConfigError(
+                    "'verbose' setting must be a boolean")
+
+
 
 def load_config(path: str | Path) -> Config:
     """
@@ -171,9 +180,12 @@ def load_config(path: str | Path) -> Config:
     if settings_dict is None:
         settings_dict = {}
 
-    settings = Settings(stop_on_failure=settings_dict.get(
-        "stop_on_failure", False),
-                        log_dir=settings_dict.get("log_dir", "logs"))
+    settings = Settings(
+        stop_on_failure=settings_dict.get("stop_on_failure", False),
+        log_dir=settings_dict.get("log_dir", "logs"),
+        verbose=settings_dict.get("verbose", False)
+    )
+
 
     # Construct Job dataclasses
     jobs = []

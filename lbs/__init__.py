@@ -10,6 +10,6 @@ A sequential build job runner for local development workflows.
 __version__ = "0.1.0"
 
 from lbs.runner import run_scheduler
+from lbs.executor import JobExecutor, CommandResult
 
-__all__ = ["run_scheduler"]
-
+__all__ = ["run_scheduler", "JobExecutor", "CommandResult"]

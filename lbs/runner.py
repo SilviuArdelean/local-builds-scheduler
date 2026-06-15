@@ -7,10 +7,10 @@ lbs.runner – Sequential job execution and logging.
 
 import datetime
 import os
-import subprocess
 import time
 from pathlib import Path
 from lbs.config import Config
+from lbs.executor import JobExecutor
 
 
 def run_scheduler(config: Config) -> bool:
@@ -76,43 +76,37 @@ def run_scheduler(config: Config) -> bool:
             log_to_job(f"CWD: {job.cwd}")
             log_to_job(f"Environment overlays: {job.env}")
 
-            # Merge environments
-            env = os.environ.copy()
-            env.update(job.env)
+            # Initialize executor for this job execution
+            verbose_mode = getattr(config.settings, "verbose", False)
+            executor = JobExecutor(verbose=verbose_mode)
 
             # Sequentially run commands
             for cmd in job.commands:
                 log_to_job(f"Executing command: {cmd}")
 
-                try:
-                    # Run subprocess with output redirected directly to the log file stream
-                    process = subprocess.Popen(cmd,
-                                               shell=True,
-                                               cwd=job.cwd,
-                                               env=env,
-                                               stdout=job_log,
-                                               stderr=subprocess.STDOUT)
-                    process.wait()
+                # Run command via JobExecutor
+                result = executor.run_command(
+                    cmd, cwd=job.cwd, env=job.env, log_file=job_log
+                )
 
-                    if process.returncode != 0:
+                if not result.success:
+                    if result.error_message:
+                        log_to_job(f"Process execution error: {result.error_message}")
+                        log_to_session(
+                            f"Job {job.name}: FAILED (Error launching command '{cmd}': {result.error_message})"
+                        )
+                    else:
                         log_to_job(
-                            f"Command failed with exit code {process.returncode}"
+                            f"Command failed with exit code {result.exit_code}"
                         )
                         log_to_session(
-                            f"Job {job.name}: FAILED (Command '{cmd}' failed with exit code {process.returncode})"
+                            f"Job {job.name}: FAILED (Command '{cmd}' failed with exit code {result.exit_code})"
                         )
-                        job_success = False
-                        break
-                    else:
-                        log_to_job("Command succeeded")
-
-                except Exception as e:
-                    log_to_job(f"Process execution error: {e}")
-                    log_to_session(
-                        f"Job {job.name}: FAILED (Error launching command '{cmd}': {e})"
-                    )
                     job_success = False
                     break
+                else:
+                    log_to_job("Command succeeded")
+
 
         # Calculate duration
         job_duration = time.perf_counter() - job_start_time
