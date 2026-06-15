@@ -1,4 +1,5 @@
 # Local Builds Scheduler
+# Copyright 2026 Silviu Ardelean
 # SPDX-License-Identifier: Apache-2.0
 """
 Unit tests for the configuration module (loading and validation).
