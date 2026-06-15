@@ -11,15 +11,20 @@ Entry point: lbs.cli:main
 import argparse
 import sys
 
-from lbs import __version__
+from lbs import __version__, run_scheduler
 from lbs.config import load_config, ConfigError
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Handle the 'lbs run <config>' subcommand."""
-    # TODO: implement job execution from config file
-    print("lbs run: not implemented", file=sys.stderr)
-    sys.exit(1)
+    try:
+        config = load_config(args.config)
+        success = run_scheduler(config)
+        sys.exit(0 if success else 1)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 
 def cmd_validate(args: argparse.Namespace) -> None:

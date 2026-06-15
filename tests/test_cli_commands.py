@@ -8,6 +8,8 @@ Integration tests for LBS CLI commands (validate, list).
 import subprocess
 import sys
 import pytest
+import yaml
+
 
 
 def test_cli_validate_success(tmp_path):
@@ -102,3 +104,91 @@ def test_cli_list_failure(tmp_path):
     )
     assert result.returncode == 1
     assert "Error:" in result.stderr
+
+
+def test_cli_run_success(tmp_path):
+    """Running 'lbs run' with a valid config and succeeding command should exit with code 0."""
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    py_cmd = f'"{sys.executable}" -c "print(\'cli-run-success\')"'
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [py_cmd]
+            }
+        ]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "LBS Session Summary" in result.stdout
+    assert "job-1                ->  SUCCESS" in result.stdout
+
+
+def test_cli_run_failure(tmp_path):
+    """Running 'lbs run' with a failing command should exit with code 1."""
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    py_cmd = f'"{sys.executable}" -c "import sys; sys.exit(42)"'
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [py_cmd]
+            }
+        ]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 1
+    assert "LBS Session Summary" in result.stdout
+    assert "job-1                ->  FAILED" in result.stdout
+
+
+
+def test_cli_run_invalid_config(tmp_path):
+    """Running 'lbs run' with an invalid config should exit with code 1 and print Error to stderr."""
+    config_file = tmp_path / "invalid.yaml"
+    yaml_content = """
+    jobs: []
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 1
+    assert "Error:" in result.stderr
+
