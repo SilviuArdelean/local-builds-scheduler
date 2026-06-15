@@ -217,14 +217,42 @@ The goal is to stay generic while allowing control where needed.
 - smarter scheduling
 - notifications
 
-## CLI (draft)
+## CLI Reference
 
+The CLI entry point `lbs` supports the following subcommands and options:
+
+### Global Options
+* `--version` — Show version info and exit.
+* `-h`, `--help` — Show help message and exit.
+
+### Subcommands
+
+#### `run`
+Run all or selected jobs defined in the configuration file.
 ```bash
-lbs run config.yaml
-lbs run config.yaml --job workspace-a
-lbs validate config.yaml
-lbs list config.yaml
+lbs run <config-path> [options]
 ```
+**Options:**
+* `-v`, `--verbose` — Mirror command execution stdout/stderr directly to standard output (in addition to the log files).
+* `-j <job-name>`, `--job <job-name>` — Run only the specified job. Can be specified multiple times to execute a subset of jobs (e.g. `lbs run config.yaml -j workspace-a -j workspace-c`).
+
+#### `validate`
+Check if the provided configuration file exists, is valid YAML, and conforms to the schema.
+```bash
+lbs validate <config-path>
+```
+
+#### `list`
+Print the names of all jobs defined in the configuration file, in order of execution (one per line).
+```bash
+lbs list <config-path>
+```
+
+### Exit Codes
+The tool exits with explicit, predictable codes:
+* `0` — Success: all scheduled jobs completed successfully.
+* `1` — Job Failure: one or more jobs failed.
+* `2` — Setup/Configuration Error: command argument parse failures, configuration syntax errors, or invalid job filter names.
 
 ## Design philosophy
 
@@ -241,9 +269,11 @@ Avoid turning it into a complex CI system too early.
 
 ## Status
 
-Early planning stage.
+**Version 0.5.0** is fully implemented and ready for local development workflows. It provides robust sequential execution, session and job-level logging, flexible failure handling, configuration validation, and job filtering.
 
-Initial implementation will be a Python CLI tool using YAML configuration.
+---
+
+AI tools were used as coding assistants during development. All generated code was reviewed, tested, and integrated by the project maintainer.
 
 ---
 
