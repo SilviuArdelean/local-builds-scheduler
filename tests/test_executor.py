@@ -10,7 +10,7 @@ import io
 import os
 import sys
 from unittest.mock import patch
-from lbs.executor import JobExecutor, CommandResult
+from lbs.utils.executor import JobExecutor, CommandResult
 
 
 def test_executor_success(tmp_path):

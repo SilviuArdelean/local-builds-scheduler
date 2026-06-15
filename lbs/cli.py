@@ -12,6 +12,7 @@ import sys
 
 from lbs import __version__, Scheduler
 from lbs.config import load_config, ConfigError
+from lbs.utils.lock import LockError
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -30,6 +31,9 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
         raise
+    except LockError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
