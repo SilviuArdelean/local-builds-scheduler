@@ -10,7 +10,7 @@ Entry point: lbs.cli:main
 import argparse
 import sys
 
-from lbs import __version__, run_scheduler
+from lbs import __version__, Scheduler
 from lbs.config import load_config, ConfigError
 
 
@@ -20,11 +20,17 @@ def cmd_run(args: argparse.Namespace) -> None:
         config = load_config(args.config)
         if args.verbose:
             config.settings.verbose = True
-        success = run_scheduler(config)
+        success = Scheduler.run(config, job_filter=args.job)
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        if args.job:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        raise
+
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -75,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Mirror execution output directly to standard output.",
+    )
+    run_parser.add_argument(
+        "-j",
+        "--job",
+        action="append",
+        help="Run specific job(s) by name. Can be specified multiple times.",
     )
     run_parser.set_defaults(func=cmd_run)
 
