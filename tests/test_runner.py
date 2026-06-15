@@ -57,6 +57,11 @@ def test_runner_success(tmp_path):
     assert "Job job-one: SUCCESS" in session_log_content
     assert "LBS Session Summary" in session_log_content
     assert "Session completed: SUCCESS" in session_log_content
+    assert "Run Summary" in session_log_content
+    assert "Passed: 1" in session_log_content
+    assert "Failed: 0" in session_log_content
+    assert "Skipped: 0" in session_log_content
+    assert "Duration: 00:00:" in session_log_content
 
 
 def test_runner_failure_non_stop(tmp_path):
@@ -113,6 +118,10 @@ def test_runner_failure_non_stop(tmp_path):
     assert "Session completed: FAILED" in session_content
     assert "job-one              ->  FAILED" in session_content
     assert "job-two              ->  SUCCESS" in session_content
+    assert "Run Summary" in session_content
+    assert "Passed: 1" in session_content
+    assert "Failed: 1" in session_content
+    assert "Skipped: 0" in session_content
 
 
 def test_runner_stop_on_failure(tmp_path):
@@ -153,6 +162,10 @@ def test_runner_stop_on_failure(tmp_path):
     assert "job-one              ->  FAILED" in session_content
     assert "job-two              ->  SKIPPED" in session_content
     assert "Session completed: FAILED" in session_content
+    assert "Run Summary" in session_content
+    assert "Passed: 0" in session_content
+    assert "Failed: 1" in session_content
+    assert "Skipped: 1" in session_content
 
 
 def test_runner_environment_propagation(tmp_path):

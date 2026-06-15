@@ -6,7 +6,6 @@ lbs.config – Configuration loader and validator.
 """
 
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 import yaml
 
@@ -101,7 +100,7 @@ def validate_config(path: str | Path) -> None:
         if not isinstance(cwd, str) or not cwd.strip():
             raise ConfigError(
                 f"Job '{name}' 'cwd' field must be a non-empty string")
-        if not os.path.isdir(cwd):
+        if not Path(cwd).is_dir():
             raise ConfigError(
                 f"Job '{name}' 'cwd' directory does not exist: {cwd}")
 

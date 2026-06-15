@@ -24,13 +24,12 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     except ValueError as e:
         if args.job:
             print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(2)
         raise
-
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -41,7 +40,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
         sys.exit(0)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -53,7 +52,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         sys.exit(0)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
 
 def build_parser() -> argparse.ArgumentParser:

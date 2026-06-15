@@ -147,7 +147,7 @@ def test_cli_filtering_success(tmp_path):
 
 
 def test_cli_filtering_invalid_name(tmp_path):
-    """Integration test: Verify that invalid job name filters print an Error and exit with code 1."""
+    """Integration test: Verify that invalid job name filters print an Error and exit with code 2."""
     config_file = tmp_path / "config.yaml"
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
@@ -175,7 +175,7 @@ def test_cli_filtering_invalid_name(tmp_path):
         text=True,
         timeout=10,
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "Error: Job filter contains invalid job names: bad-name-xyz" in result.stderr
 
 

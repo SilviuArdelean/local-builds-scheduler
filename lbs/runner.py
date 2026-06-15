@@ -6,7 +6,6 @@ lbs.runner – Sequential job execution and logging.
 """
 
 import datetime
-import os
 import time
 from pathlib import Path
 from lbs.config import Config
@@ -28,6 +27,7 @@ class Scheduler:
         If job_filter is specified, only executes jobs with names in the filter.
         Raises ValueError if job_filter contains any invalid job names.
         """
+        session_start_time = time.perf_counter()
         # Normalize job_filter
         if job_filter is None:
             filter_list = []
@@ -45,7 +45,10 @@ class Scheduler:
                 raise ValueError(
                     f"Job filter contains invalid job names: {', '.join(sorted(invalid_names))}"
                 )
-            jobs_to_run = {job.name for job in config.jobs if job.name in filter_set}
+            jobs_to_run = {
+                job.name
+                for job in config.jobs if job.name in filter_set
+            }
         else:
             jobs_to_run = {job.name for job in config.jobs}
 
@@ -55,7 +58,6 @@ class Scheduler:
 
         session_date = datetime.datetime.now().strftime("%Y-%m-%d")
         session_log_path = log_dir / f"{session_date}_session.log"
-
 
         # Track execution details for summary
         # Format: {job_name: {"status": "SUCCESS" | "FAILED" | "SKIPPED", "duration": float | None}}
@@ -87,7 +89,10 @@ class Scheduler:
                 continue
 
             if aborted:
-                job_summaries[job.name] = {"status": "SKIPPED", "duration": None}
+                job_summaries[job.name] = {
+                    "status": "SKIPPED",
+                    "duration": None
+                }
                 continue
 
             log_to_session(f"Starting job: {job.name} (cwd: {job.cwd})")
@@ -118,13 +123,16 @@ class Scheduler:
                     log_to_job(f"Executing command: {cmd}")
 
                     # Run command via JobExecutor
-                    result = executor.run_command(
-                        cmd, cwd=job.cwd, env=job.env, log_file=job_log
-                    )
+                    result = executor.run_command(cmd,
+                                                  cwd=job.cwd,
+                                                  env=job.env,
+                                                  log_file=job_log)
 
                     if not result.success:
                         if result.error_message:
-                            log_to_job(f"Process execution error: {result.error_message}")
+                            log_to_job(
+                                f"Process execution error: {result.error_message}"
+                            )
                             log_to_session(
                                 f"Job {job.name}: FAILED (Error launching command '{cmd}': {result.error_message})"
                             )
@@ -173,12 +181,42 @@ class Scheduler:
             status = summary["status"]
             dur = summary["duration"]
             dur_str = f"{dur:.2f}s" if dur is not None else "-"
-            summary_lines.append(f"Job: {name:<20} ->  {status:<10} ({dur_str})")
+            summary_lines.append(
+                f"Job: {name:<20} ->  {status:<10} ({dur_str})")
         summary_lines.append("=" * 50)
 
         session_status = "SUCCESS" if overall_success else "FAILED"
         summary_lines.append(f"Session completed: {session_status}")
         summary_lines.append("")
+
+        # Count job statuses for the final summary
+        passed_count = sum(
+            1 for s in job_summaries.values() if s["status"] == "SUCCESS"
+        )
+        failed_count = sum(
+            1 for s in job_summaries.values() if s["status"] == "FAILED"
+        )
+        skipped_count = sum(
+            1 for s in job_summaries.values() if s["status"] == "SKIPPED"
+        )
+
+        # Format elapsed duration to HH:MM:SS
+        elapsed_time = time.perf_counter() - session_start_time
+        total_seconds = int(elapsed_time)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        summary_lines.extend([
+            "Run Summary",
+            "-----------",
+            f"Passed: {passed_count}",
+            f"Failed: {failed_count}",
+            f"Skipped: {skipped_count}",
+            f"Duration: {duration_str}",
+            "",
+        ])
 
         summary_text = "\n".join(summary_lines)
 
@@ -198,4 +236,3 @@ def run_scheduler(config: Config) -> bool:
     Main sequential execution loop for LBS jobs.
     """
     return Scheduler.run(config)
-

@@ -38,7 +38,7 @@ def test_cli_validate_success(tmp_path):
 
 
 def test_cli_validate_failure(tmp_path):
-    """Running 'lbs validate' with an invalid config should exit with code 1 and print error to stderr."""
+    """Running 'lbs validate' with an invalid config should exit with code 2 and print error to stderr."""
     config_file = tmp_path / "invalid.yaml"
     # CWD directory does not exist, which causes validation failure
     yaml_content = """
@@ -55,7 +55,7 @@ def test_cli_validate_failure(tmp_path):
         text=True,
         timeout=10,
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "Error:" in result.stderr
 
 
@@ -89,7 +89,7 @@ def test_cli_list_success(tmp_path):
 
 
 def test_cli_list_failure(tmp_path):
-    """Running 'lbs list' with an invalid config should exit with code 1 and print error to stderr."""
+    """Running 'lbs list' with an invalid config should exit with code 2 and print error to stderr."""
     config_file = tmp_path / "invalid.yaml"
     # Jobs list cannot be empty
     yaml_content = """
@@ -103,7 +103,7 @@ def test_cli_list_failure(tmp_path):
         text=True,
         timeout=10,
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "Error:" in result.stderr
 
 
@@ -177,7 +177,7 @@ def test_cli_run_failure(tmp_path):
 
 
 def test_cli_run_invalid_config(tmp_path):
-    """Running 'lbs run' with an invalid config should exit with code 1 and print Error to stderr."""
+    """Running 'lbs run' with an invalid config should exit with code 2 and print Error to stderr."""
     config_file = tmp_path / "invalid.yaml"
     yaml_content = """
     jobs: []
@@ -190,6 +190,6 @@ def test_cli_run_invalid_config(tmp_path):
         text=True,
         timeout=10,
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "Error:" in result.stderr
 
