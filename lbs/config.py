@@ -31,6 +31,8 @@ class Job:
     cwd: str
     commands: list[str]
     env: dict[str, str] = field(default_factory=dict)
+    retries: int = 0
+    retry_delay_seconds: int | float = 0
 
 
 @dataclass
@@ -132,6 +134,22 @@ def validate_config(path: str | Path) -> None:
                     raise ConfigError(
                         f"Job '{name}' 'env' value for '{k}' must be a string")
 
+        # Retries (Optional)
+        if "retries" in job_data:
+            retries = job_data["retries"]
+            if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+                raise ConfigError(
+                    f"Job '{name}' 'retries' field must be a non-negative integer"
+                )
+
+        # Retry Delay Seconds (Optional)
+        if "retry_delay_seconds" in job_data:
+            delay = job_data["retry_delay_seconds"]
+            if not isinstance(delay, (int, float)) or isinstance(delay, bool) or delay < 0:
+                raise ConfigError(
+                    f"Job '{name}' 'retry_delay_seconds' field must be a non-negative number"
+                )
+
     # Validate Settings (Optional)
     if "settings" in data:
         settings_data = data["settings"]
@@ -193,6 +211,8 @@ def load_config(path: str | Path) -> Config:
             Job(name=job_data["name"],
                 cwd=job_data["cwd"],
                 commands=list(job_data["commands"]),
-                env=dict(job_data.get("env", {}))))
+                env=dict(job_data.get("env", {})),
+                retries=job_data.get("retries", 0),
+                retry_delay_seconds=job_data.get("retry_delay_seconds", 0)))
 
     return Config(settings=settings, jobs=jobs)

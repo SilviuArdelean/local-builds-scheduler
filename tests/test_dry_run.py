@@ -142,3 +142,41 @@ def test_dry_run_invalid_filter(tmp_path):
     )
     assert result.returncode == 2
     assert "Error: Job filter contains invalid job names: missing-job" in result.stderr
+
+
+def test_dry_run_with_retries(tmp_path):
+    """Verify that --dry-run prints job retries details if configured."""
+    config_file = tmp_path / "config.yaml"
+    log_dir = tmp_path / "logs"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [
+            {
+                "name": "job-A",
+                "cwd": str(workspace_dir),
+                "commands": ["echo A1"],
+                "retries": 3,
+                "retry_delay_seconds": 12
+            }
+        ]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "lbs", "run",
+            str(config_file), "--dry-run"
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "Dry-Run Execution Plan" in result.stdout
+    assert "Job: job-A" in result.stdout
+    assert "  Retries: 3 (delay: 12s)" in result.stdout

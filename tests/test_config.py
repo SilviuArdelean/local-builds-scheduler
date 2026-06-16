@@ -179,3 +179,88 @@ def test_env_non_string_values(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(config_file)
     assert "env' value for 'PORT' must be a string" in str(exc.value)
+
+
+def test_config_retries_validation(tmp_path):
+    """Verify that retries and retry_delay_seconds are validated properly."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    
+    # 1. Negative retries should fail
+    config_file1 = tmp_path / "bad_retries.yaml"
+    config_file1.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retries: -1
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file1)
+    assert "retries' field must be a non-negative integer" in str(exc.value)
+
+    # 2. Non-integer retries (e.g. float) should fail
+    config_file2 = tmp_path / "bad_retries_float.yaml"
+    config_file2.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retries: 2.5
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file2)
+    assert "retries' field must be a non-negative integer" in str(exc.value)
+
+    # 3. Boolean retries (e.g. true) should fail
+    config_file3 = tmp_path / "bad_retries_bool.yaml"
+    config_file3.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retries: true
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3)
+    assert "retries' field must be a non-negative integer" in str(exc.value)
+
+    # 4. Negative retry_delay_seconds should fail
+    config_file4 = tmp_path / "bad_delay.yaml"
+    config_file4.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retry_delay_seconds: -10
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file4)
+    assert "retry_delay_seconds' field must be a non-negative number" in str(exc.value)
+
+    # 5. Boolean retry_delay_seconds should fail
+    config_file5 = tmp_path / "bad_delay_bool.yaml"
+    config_file5.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retry_delay_seconds: false
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file5)
+    assert "retry_delay_seconds' field must be a non-negative number" in str(exc.value)
+
+    # 6. Valid float and integer parameters should load successfully
+    config_file6 = tmp_path / "good_retries.yaml"
+    config_file6.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retries: 3
+        retry_delay_seconds: 1.5
+    """, encoding="utf-8")
+    config = load_config(config_file6)
+    assert config.jobs[0].retries == 3
+    assert config.jobs[0].retry_delay_seconds == 1.5

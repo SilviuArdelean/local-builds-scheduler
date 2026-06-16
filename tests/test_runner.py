@@ -204,3 +204,88 @@ def test_runner_environment_propagation(tmp_path):
         # Clean up global env modification
         if "LBS_TEST_ONE" in os.environ:
             del os.environ["LBS_TEST_ONE"]
+
+
+def test_runner_retry_success(tmp_path):
+    """Verify that a job failing on first attempt but succeeding on retry is reported as SUCCESS."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    
+    # Creates a flag file. Succeeds only if flag file already exists.
+    flag_file = tmp_path / "flag.txt"
+    py_cmd = (
+        f'"{sys.executable}" -c "import os, sys; '
+        f'exists = os.path.exists(r\'{flag_file}\'); '
+        f'open(r\'{flag_file}\', \'w\').close(); '
+        f'sys.exit(0 if exists else 1)"'
+    )
+    
+    jobs = [
+        Job(
+            name="job-retry-success",
+            cwd=str(tmp_path),
+            commands=[py_cmd],
+            retries=1,
+            retry_delay_seconds=0.01
+        )
+    ]
+    config = Config(settings=settings, jobs=jobs)
+    
+    success = run_scheduler(config)
+    assert success is True
+    
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    job_log = log_dir / f"{date_str}_job-retry-success.log"
+    session_log = log_dir / f"{date_str}_session.log"
+    
+    assert job_log.exists()
+    job_content = job_log.read_text(encoding="utf-8")
+    assert "--- Retry Attempt 1 / 1 ---" in job_content
+    
+    session_content = session_log.read_text(encoding="utf-8")
+    assert "Job job-retry-success failed. Retrying in 0.01 seconds" in session_content
+    assert "Job job-retry-success: ATTEMPT FAILED" in session_content
+    assert "Job job-retry-success: FAILED" not in session_content
+    assert "Job job-retry-success: SUCCESS" in session_content
+
+
+def test_runner_retry_exhausted(tmp_path):
+    """Verify that retries are exhausted, delay is respected, and failure is reported."""
+    from unittest.mock import patch
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    
+    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+    
+    jobs = [
+        Job(
+            name="job-retry-fail",
+            cwd=str(tmp_path),
+            commands=[py_fail],
+            retries=2,
+            retry_delay_seconds=15
+        )
+    ]
+    config = Config(settings=settings, jobs=jobs)
+    
+    with patch("time.sleep") as mock_sleep:
+        success = run_scheduler(config)
+        assert success is False
+        
+        # Should sleep twice (once after first try, once after second try)
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_called_with(15)
+        
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    job_log = log_dir / f"{date_str}_job-retry-fail.log"
+    session_log = log_dir / f"{date_str}_session.log"
+    
+    job_content = job_log.read_text(encoding="utf-8")
+    assert "--- Retry Attempt 1 / 2 ---" in job_content
+    assert "--- Retry Attempt 2 / 2 ---" in job_content
+    
+    session_content = session_log.read_text(encoding="utf-8")
+    assert "Job job-retry-fail failed. Retrying in 15 seconds (attempt 1/2)..." in session_content
+    assert "Job job-retry-fail failed. Retrying in 15 seconds (attempt 2/2)..." in session_content
+    assert "Job job-retry-fail: ATTEMPT FAILED" in session_content
+    assert "Job job-retry-fail: FAILED" in session_content
