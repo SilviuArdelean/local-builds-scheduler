@@ -17,7 +17,11 @@ class Scheduler:
     """Orchestrates sequential execution of job queues, filtering, and logging."""
 
     @staticmethod
-    def run(config: Config, job_filter: list[str] | str | None = None) -> bool:
+    def run(
+        config: Config,
+        job_filter: list[str] | str | None = None,
+        dry_run: bool = False,
+    ) -> bool:
         """
         Main sequential execution loop for LBS jobs.
         
@@ -52,6 +56,28 @@ class Scheduler:
             }
         else:
             jobs_to_run = {job.name for job in config.jobs}
+
+        if dry_run:
+            print("Dry-Run Execution Plan")
+            print("======================")
+            print(f"Log Directory: {config.settings.log_dir}")
+            print()
+            for job in config.jobs:
+                if job.name not in jobs_to_run:
+                    continue
+                print(f"Job: {job.name}")
+                print(f"  CWD: {job.cwd}")
+                env_str = (
+                    ", ".join(f"{k}={v}" for k, v in job.env.items())
+                    if job.env
+                    else "None"
+                )
+                print(f"  Environment: {env_str}")
+                print("  Commands:")
+                for cmd in job.commands:
+                    print(f"    - {cmd}")
+                print()
+            return True
 
         # Initialize filesystem logs
         log_dir = Path(config.settings.log_dir)
