@@ -6,6 +6,7 @@ lbs.config – Configuration loader and validator.
 """
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 import yaml
 
@@ -33,6 +34,7 @@ class Job:
     env: dict[str, str] = field(default_factory=dict)
     retries: int = 0
     retry_delay_seconds: int | float = 0
+    command_timeout_minutes: int | float | None = None
 
 
 @dataclass
@@ -145,9 +147,17 @@ def validate_config(path: str | Path) -> None:
         # Retry Delay Seconds (Optional)
         if "retry_delay_seconds" in job_data:
             delay = job_data["retry_delay_seconds"]
-            if not isinstance(delay, (int, float)) or isinstance(delay, bool) or delay < 0:
+            if not isinstance(delay, (int, float)) or isinstance(delay, bool) or not math.isfinite(delay) or delay < 0:
                 raise ConfigError(
-                    f"Job '{name}' 'retry_delay_seconds' field must be a non-negative number"
+                    f"Job '{name}' 'retry_delay_seconds' field must be a non-negative finite number"
+                )
+
+        # Command Timeout Minutes (Optional)
+        if "command_timeout_minutes" in job_data:
+            timeout = job_data["command_timeout_minutes"]
+            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+                raise ConfigError(
+                    f"Job '{name}' 'command_timeout_minutes' field must be a positive finite number"
                 )
 
     # Validate Settings (Optional)
@@ -213,6 +223,7 @@ def load_config(path: str | Path) -> Config:
                 commands=list(job_data["commands"]),
                 env=dict(job_data.get("env", {})),
                 retries=job_data.get("retries", 0),
-                retry_delay_seconds=job_data.get("retry_delay_seconds", 0)))
+                retry_delay_seconds=job_data.get("retry_delay_seconds", 0),
+                command_timeout_minutes=job_data.get("command_timeout_minutes", None)))
 
     return Config(settings=settings, jobs=jobs)

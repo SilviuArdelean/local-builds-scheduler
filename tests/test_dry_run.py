@@ -180,3 +180,40 @@ def test_dry_run_with_retries(tmp_path):
     assert "Dry-Run Execution Plan" in result.stdout
     assert "Job: job-A" in result.stdout
     assert "  Retries: 3 (delay: 12s)" in result.stdout
+
+
+def test_dry_run_with_timeout(tmp_path):
+    """Verify that --dry-run prints job command timeout details if configured."""
+    config_file = tmp_path / "config.yaml"
+    log_dir = tmp_path / "logs"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [
+            {
+                "name": "job-A",
+                "cwd": str(workspace_dir),
+                "commands": ["echo A1"],
+                "command_timeout_minutes": 15.5
+            }
+        ]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "lbs", "run",
+            str(config_file), "--dry-run"
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "Dry-Run Execution Plan" in result.stdout
+    assert "Job: job-A" in result.stdout
+    assert "  Timeout: 15.5m" in result.stdout

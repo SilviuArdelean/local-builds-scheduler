@@ -8,9 +8,12 @@ lbs.utils.executor – Command execution engine with live output streaming and m
 from dataclasses import dataclass
 import datetime
 import os
+import queue
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -39,6 +42,7 @@ class JobExecutor:
         env: dict[str, str] | None = None,
         log_file=None,
         shell: bool = True,
+        timeout: float | None = None,
     ) -> CommandResult:
         """
         Execute a shell or direct command inside cwd with environment overlays.
@@ -70,20 +74,70 @@ class JobExecutor:
             # If shell execution is disabled, split command string into arguments list
             popen_cmd = shlex.split(cmd) if not shell else cmd
 
-            # Spawn subprocess
-            process = subprocess.Popen(
-                popen_cmd,
-                shell=shell,
-                cwd=cwd,
-                env=merged_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            # Spawn subprocess in process group/session for platform-appropriate group termination
+            popen_kwargs = {
+                "shell": shell,
+                "cwd": cwd,
+                "env": merged_env,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
 
-            # Stream output live
+            process = subprocess.Popen(popen_cmd, **popen_kwargs)
+
+            # Stream output live using a bounded queue of max size 1000 for backpressure
             if process.stdout:
-                for line in iter(process.stdout.readline, b""):
-                    decoded_line = line.decode("utf-8", errors="replace")
+                q = queue.Queue(maxsize=1000)
+
+                def enqueue_output(out, queue_obj):
+                    try:
+                        for line in iter(out.readline, b""):
+                            queue_obj.put(line)
+                    finally:
+                        out.close()
+                        queue_obj.put(None)
+
+                reader_thread = threading.Thread(
+                    target=enqueue_output,
+                    args=(process.stdout, q),
+                    daemon=True,
+                )
+                reader_thread.start()
+
+                deadline = (t_start + timeout) if timeout is not None else None
+                timed_out = False
+
+                while True:
+                    time_left = (
+                        deadline -
+                        time.perf_counter()) if deadline is not None else None
+                    if deadline is not None and time_left <= 0:
+                        if process.poll() is not None:
+                            timed_out = False
+                        else:
+                            timed_out = True
+                        break
+
+                    try:
+                        get_timeout = max(
+                            0, time_left) if time_left is not None else None
+                        line_bytes = q.get(timeout=get_timeout)
+                    except queue.Empty:
+                        if process.poll() is not None:
+                            timed_out = False
+                        else:
+                            timed_out = True
+                        break
+
+                    if line_bytes is None:
+                        break
+
+                    decoded_line = line_bytes.decode("utf-8", errors="replace")
 
                     if log_file:
                         log_file.write(decoded_line)
@@ -93,9 +147,107 @@ class JobExecutor:
                         sys.stdout.write(decoded_line)
                         sys.stdout.flush()
 
-            process.wait()
-            exit_code = process.returncode
-            success = (exit_code == 0)
+                if timed_out:
+                    # Terminate process group/session
+                    if sys.platform == "win32":
+                        try:
+                            os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+
+                    process.wait()
+
+                    # Drain bounded queue so reader thread is not blocked on queue.put
+                    while True:
+                        try:
+                            line_bytes = q.get(timeout=0.5)
+                        except queue.Empty:
+                            break
+                        if line_bytes is None:
+                            break
+
+                    formatted_timeout = f"{timeout:.6f}".rstrip("0").rstrip(
+                        ".")
+                    error_message = f"Command timed out after {formatted_timeout} seconds"
+                    if log_file:
+                        log_file.write(f"[ERROR] {error_message}\n")
+                        log_file.flush()
+                    if self.verbose:
+                        print(f"[ERROR] {error_message}", file=sys.stderr)
+                    exit_code = None
+                    success = False
+                else:
+                    # Drain any remaining lines from the queue until the sentinel
+                    while True:
+                        try:
+                            line_bytes = q.get(timeout=0.5)
+                        except queue.Empty:
+                            break
+                        if line_bytes is None:
+                            break
+
+                        decoded_line = line_bytes.decode("utf-8",
+                                                         errors="replace")
+                        if log_file:
+                            log_file.write(decoded_line)
+                            log_file.flush()
+                        if self.verbose:
+                            sys.stdout.write(decoded_line)
+                            sys.stdout.flush()
+
+                    process.wait()
+                    exit_code = process.returncode
+                    success = (exit_code == 0)
+            else:
+                if timeout is not None:
+                    try:
+                        exit_code = process.wait(timeout=timeout)
+                        success = (exit_code == 0)
+                    except subprocess.TimeoutExpired:
+                        if sys.platform == "win32":
+                            try:
+                                os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+                            except Exception:
+                                try:
+                                    process.kill()
+                                except Exception:
+                                    pass
+                        else:
+                            try:
+                                os.killpg(os.getpgid(process.pid),
+                                          signal.SIGKILL)
+                            except Exception:
+                                try:
+                                    process.kill()
+                                except Exception:
+                                    pass
+
+                        process.wait()
+                        formatted_timeout = f"{timeout:.6f}".rstrip(
+                            "0").rstrip(".")
+                        error_message = f"Command timed out after {formatted_timeout} seconds"
+                        if log_file:
+                            log_file.write(f"[ERROR] {error_message}\n")
+                            log_file.flush()
+                        if self.verbose:
+                            print(f"[ERROR] {error_message}", file=sys.stderr)
+                        exit_code = None
+                        success = False
+                else:
+                    process.wait()
+                    exit_code = process.returncode
+                    success = (exit_code == 0)
 
         except FileNotFoundError as e:
             error_message = str(e)
