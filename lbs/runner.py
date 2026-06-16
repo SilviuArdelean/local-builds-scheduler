@@ -67,14 +67,16 @@ class Scheduler:
                     continue
                 print(f"Job: {job.name}")
                 print(f"  CWD: {job.cwd}")
-                env_str = (
-                    ", ".join(f"{k}={v}" for k, v in job.env.items())
-                    if job.env
-                    else "None"
-                )
+                env_str = (", ".join(
+                    f"{k}={v}"
+                    for k, v in job.env.items()) if job.env else "None")
                 print(f"  Environment: {env_str}")
                 if job.retries > 0:
-                    print(f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)")
+                    print(
+                        f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)"
+                    )
+                if job.command_timeout_minutes is not None:
+                    print(f"  Timeout: {job.command_timeout_minutes}m")
                 print("  Commands:")
                 for cmd in job.commands:
                     print(f"    - {cmd}")
@@ -104,7 +106,8 @@ class Scheduler:
             aborted = False
 
             def log_to_session(msg: str) -> None:
-                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = datetime.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S")
                 formatted_msg = f"[{timestamp}] {msg}\n"
                 with open(session_log_path, "a", encoding="utf-8") as f:
                     f.write(formatted_msg)
@@ -147,14 +150,17 @@ class Scheduler:
                             job_log.flush()
 
                         if attempt > 1:
-                            log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
+                            log_to_job(
+                                f"--- Retry Attempt {attempt - 1} / {job.retries} ---"
+                            )
                         else:
                             log_to_job(f"Job '{job.name}' started")
                             log_to_job(f"CWD: {job.cwd}")
                             log_to_job(f"Environment overlays: {job.env}")
 
                         # Initialize executor for this job execution
-                        verbose_mode = getattr(config.settings, "verbose", False)
+                        verbose_mode = getattr(config.settings, "verbose",
+                                               False)
                         executor = JobExecutor(verbose=verbose_mode)
 
                         # Sequentially run commands
@@ -162,10 +168,14 @@ class Scheduler:
                             log_to_job(f"Executing command: {cmd}")
 
                             # Run command via JobExecutor
+                            timeout_sec = (job.command_timeout_minutes *
+                                           60 if job.command_timeout_minutes
+                                           is not None else None)
                             result = executor.run_command(cmd,
                                                           cwd=job.cwd,
                                                           env=job.env,
-                                                          log_file=job_log)
+                                                          log_file=job_log,
+                                                          timeout=timeout_sec)
 
                             if not result.success:
                                 status_label = "ATTEMPT FAILED" if attempt < total_attempts else "FAILED"
@@ -174,7 +184,7 @@ class Scheduler:
                                         f"Process execution error: {result.error_message}"
                                     )
                                     log_to_session(
-                                        f"Job {job.name}: {status_label} (Error launching command '{cmd}': {result.error_message})"
+                                        f"Job {job.name}: {status_label} (Command '{cmd}' failed: {result.error_message})"
                                     )
                                 else:
                                     log_to_job(
@@ -239,15 +249,12 @@ class Scheduler:
             summary_lines.append("")
 
             # Count job statuses for the final summary
-            passed_count = sum(
-                1 for s in job_summaries.values() if s["status"] == "SUCCESS"
-            )
-            failed_count = sum(
-                1 for s in job_summaries.values() if s["status"] == "FAILED"
-            )
-            skipped_count = sum(
-                1 for s in job_summaries.values() if s["status"] == "SKIPPED"
-            )
+            passed_count = sum(1 for s in job_summaries.values()
+                               if s["status"] == "SUCCESS")
+            failed_count = sum(1 for s in job_summaries.values()
+                               if s["status"] == "FAILED")
+            skipped_count = sum(1 for s in job_summaries.values()
+                                if s["status"] == "SKIPPED")
 
             # Format elapsed duration to HH:MM:SS
             elapsed_time = time.perf_counter() - session_start_time

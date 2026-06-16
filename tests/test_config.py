@@ -236,7 +236,7 @@ def test_config_retries_validation(tmp_path):
     """, encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file4)
-    assert "retry_delay_seconds' field must be a non-negative number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
 
     # 5. Boolean retry_delay_seconds should fail
     config_file5 = tmp_path / "bad_delay_bool.yaml"
@@ -249,7 +249,33 @@ def test_config_retries_validation(tmp_path):
     """, encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file5)
-    assert "retry_delay_seconds' field must be a non-negative number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+
+    # 5b. Infinite retry_delay_seconds should fail
+    config_file5b = tmp_path / "bad_delay_inf.yaml"
+    config_file5b.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retry_delay_seconds: .inf
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file5b)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+
+    # 5c. NaN retry_delay_seconds should fail
+    config_file5c = tmp_path / "bad_delay_nan.yaml"
+    config_file5c.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        retry_delay_seconds: .nan
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file5c)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
 
     # 6. Valid float and integer parameters should load successfully
     config_file6 = tmp_path / "good_retries.yaml"
@@ -264,3 +290,86 @@ def test_config_retries_validation(tmp_path):
     config = load_config(config_file6)
     assert config.jobs[0].retries == 3
     assert config.jobs[0].retry_delay_seconds == 1.5
+
+
+def test_config_timeout_validation(tmp_path):
+    """Verify that command_timeout_minutes is validated properly."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    # 1. Negative timeout should fail
+    config_file1 = tmp_path / "bad_timeout.yaml"
+    config_file1.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: -10
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file1)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+
+    # 2. Zero timeout should fail
+    config_file2 = tmp_path / "zero_timeout.yaml"
+    config_file2.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: 0
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file2)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+
+    # 3. Boolean timeout should fail
+    config_file3 = tmp_path / "bool_timeout.yaml"
+    config_file3.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: true
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+
+    # 3b. Infinite timeout should fail
+    config_file3b = tmp_path / "bad_timeout_inf.yaml"
+    config_file3b.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: .inf
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3b)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+
+    # 3c. NaN timeout should fail
+    config_file3c = tmp_path / "bad_timeout_nan.yaml"
+    config_file3c.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: .nan
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3c)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+
+    # 4. Valid timeout should load successfully
+    config_file4 = tmp_path / "good_timeout.yaml"
+    config_file4.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        command_timeout_minutes: 2.5
+    """, encoding="utf-8")
+    config = load_config(config_file4)
+    assert config.jobs[0].command_timeout_minutes == 2.5
