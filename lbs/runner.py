@@ -73,6 +73,8 @@ class Scheduler:
                     else "None"
                 )
                 print(f"  Environment: {env_str}")
+                if job.retries > 0:
+                    print(f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)")
                 print("  Commands:")
                 for cmd in job.commands:
                     print(f"    - {cmd}")
@@ -127,58 +129,76 @@ class Scheduler:
                 log_to_session(f"Starting job: {job.name} (cwd: {job.cwd})")
                 job_log_path = log_dir / f"{session_date}_{job.name}.log"
 
-                job_start_time = time.perf_counter()
-                job_success = True
+                job_success = False
+                job_duration = 0.0
+                total_attempts = 1 + job.retries
 
-                # Open job log in append mode, with line buffering or explicit flushing
-                with open(job_log_path, "a", encoding="utf-8") as job_log:
+                for attempt in range(1, total_attempts + 1):
+                    job_start_time = time.perf_counter()
+                    job_success = True
 
-                    def log_to_job(msg: str) -> None:
-                        timestamp = datetime.datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S")
-                        job_log.write(f"[{timestamp}] {msg}\n")
-                        job_log.flush()
+                    # Open job log in append mode, with line buffering or explicit flushing
+                    with open(job_log_path, "a", encoding="utf-8") as job_log:
 
-                    log_to_job(f"Job '{job.name}' started")
-                    log_to_job(f"CWD: {job.cwd}")
-                    log_to_job(f"Environment overlays: {job.env}")
+                        def log_to_job(msg: str) -> None:
+                            timestamp = datetime.datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S")
+                            job_log.write(f"[{timestamp}] {msg}\n")
+                            job_log.flush()
 
-                    # Initialize executor for this job execution
-                    verbose_mode = getattr(config.settings, "verbose", False)
-                    executor = JobExecutor(verbose=verbose_mode)
-
-                    # Sequentially run commands
-                    for cmd in job.commands:
-                        log_to_job(f"Executing command: {cmd}")
-
-                        # Run command via JobExecutor
-                        result = executor.run_command(cmd,
-                                                      cwd=job.cwd,
-                                                      env=job.env,
-                                                      log_file=job_log)
-
-                        if not result.success:
-                            if result.error_message:
-                                log_to_job(
-                                    f"Process execution error: {result.error_message}"
-                                )
-                                log_to_session(
-                                    f"Job {job.name}: FAILED (Error launching command '{cmd}': {result.error_message})"
-                                )
-                            else:
-                                log_to_job(
-                                    f"Command failed with exit code {result.exit_code}"
-                                )
-                                log_to_session(
-                                    f"Job {job.name}: FAILED (Command '{cmd}' failed with exit code {result.exit_code})"
-                                )
-                            job_success = False
-                            break
+                        if attempt > 1:
+                            log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
                         else:
-                            log_to_job("Command succeeded")
+                            log_to_job(f"Job '{job.name}' started")
+                            log_to_job(f"CWD: {job.cwd}")
+                            log_to_job(f"Environment overlays: {job.env}")
 
-                # Calculate duration
-                job_duration = time.perf_counter() - job_start_time
+                        # Initialize executor for this job execution
+                        verbose_mode = getattr(config.settings, "verbose", False)
+                        executor = JobExecutor(verbose=verbose_mode)
+
+                        # Sequentially run commands
+                        for cmd in job.commands:
+                            log_to_job(f"Executing command: {cmd}")
+
+                            # Run command via JobExecutor
+                            result = executor.run_command(cmd,
+                                                          cwd=job.cwd,
+                                                          env=job.env,
+                                                          log_file=job_log)
+
+                            if not result.success:
+                                status_label = "ATTEMPT FAILED" if attempt < total_attempts else "FAILED"
+                                if result.error_message:
+                                    log_to_job(
+                                        f"Process execution error: {result.error_message}"
+                                    )
+                                    log_to_session(
+                                        f"Job {job.name}: {status_label} (Error launching command '{cmd}': {result.error_message})"
+                                    )
+                                else:
+                                    log_to_job(
+                                        f"Command failed with exit code {result.exit_code}"
+                                    )
+                                    log_to_session(
+                                        f"Job {job.name}: {status_label} (Command '{cmd}' failed with exit code {result.exit_code})"
+                                    )
+                                job_success = False
+                                break
+                            else:
+                                log_to_job("Command succeeded")
+
+                    # Calculate duration for this attempt, adding to total execution duration
+                    job_duration += time.perf_counter() - job_start_time
+
+                    if job_success:
+                        break
+                    else:
+                        if attempt < total_attempts:
+                            log_to_session(
+                                f"Job {job.name} failed. Retrying in {job.retry_delay_seconds} seconds (attempt {attempt}/{job.retries})..."
+                            )
+                            time.sleep(job.retry_delay_seconds)
 
                 if job_success:
                     log_to_session(
