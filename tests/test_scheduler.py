@@ -185,7 +185,7 @@ def test_cli_run_value_error_without_job(tmp_path):
     import argparse
     from unittest.mock import patch
     
-    args = argparse.Namespace(config="some_config.yaml", verbose=False, job=None)
+    args = argparse.Namespace(config="some_config.yaml", verbose=False, job=None, dry_run=False)
     
     with patch("lbs.cli.load_config") as mock_load, \
          patch("lbs.cli.Scheduler.run", side_effect=ValueError("Programming error")):

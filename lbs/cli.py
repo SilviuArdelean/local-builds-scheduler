@@ -21,7 +21,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         config = load_config(args.config)
         if args.verbose:
             config.settings.verbose = True
-        success = Scheduler.run(config, job_filter=args.job)
+        success = Scheduler.run(
+            config, job_filter=args.job, dry_run=getattr(args, "dry_run", False)
+        )
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -90,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--job",
         action="append",
         help="Run specific job(s) by name. Can be specified multiple times.",
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and print the execution plan without running commands.",
     )
     run_parser.set_defaults(func=cmd_run)
 
