@@ -8,11 +8,43 @@ Entry point: lbs.cli:main
 """
 
 import argparse
+import subprocess
 import sys
 
 from lbs import __version__, Scheduler
 from lbs.config import load_config, ConfigError
 from lbs.utils.lock import LockError
+
+
+def trigger_os_shutdown() -> None:
+    """
+    Schedules an OS shutdown.
+    On Windows: calls shutdown /s /t 60 (60 second delay, abort via shutdown /a).
+    On POSIX (Linux/macOS): calls shutdown -h +1 (1 minute delay, abort via shutdown -c).
+    """
+    try:
+        if sys.platform == "win32":
+            cmd = ["shutdown", "/s", "/t", "60"]
+            warning_msg = "\n[WARNING] System shutdown scheduled in 60 seconds."
+            abort_msg = "To abort the shutdown, run: shutdown /a"
+        else:
+            cmd = ["shutdown", "-h", "+1"]
+            warning_msg = "\n[WARNING] System shutdown scheduled in 1 minute."
+            abort_msg = "To abort the shutdown, run: shutdown -c"
+
+        # Run the command first. If check=True raises CalledProcessError,
+        # we do not output the success/warning messages.
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(warning_msg)
+        print(abort_msg)
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.strip() if e.stderr else str(e)
+        print(
+            f"Failed to initiate system shutdown (exit code {e.returncode}): {err_msg}",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(f"Failed to initiate system shutdown: {e}", file=sys.stderr)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -34,6 +66,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             resume=getattr(args, "resume", None),
             config_path=args.config,
         )
+        if getattr(args, "shutdown", False):
+            trigger_os_shutdown()
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -102,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--notifications",
         action="store_true",
         help="Enable notifications for this run.",
+    )
+    run_parser.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="Automatically shut down the system after completion of all jobs.",
     )
     run_parser.add_argument(
         "-v",
