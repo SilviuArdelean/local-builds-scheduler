@@ -22,14 +22,18 @@ def cmd_run(args: argparse.Namespace) -> None:
         if args.verbose:
             config.settings.verbose = True
         success = Scheduler.run(
-            config, job_filter=args.job, dry_run=getattr(args, "dry_run", False)
+            config,
+            job_filter=args.job,
+            dry_run=getattr(args, "dry_run", False),
+            resume=getattr(args, "resume", None),
+            config_path=args.config,
         )
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
     except ValueError as e:
-        if args.job:
+        if getattr(args, "job", None) or getattr(args, "resume", None):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
         raise
@@ -97,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Validate and print the execution plan without running commands.",
+    )
+    run_parser.add_argument(
+        "--resume",
+        choices=["latest"],
+        help=
+        "Resume a failed or interrupted session. Currently supports 'latest'.",
     )
     run_parser.set_defaults(func=cmd_run)
 

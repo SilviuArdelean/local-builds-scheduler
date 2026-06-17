@@ -6,11 +6,49 @@ lbs.runner – Sequential job execution and logging.
 """
 
 import datetime
-import time
+import json
+import os
 from pathlib import Path
+import re
+import tempfile
+import time
 from lbs.config import Config
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
+
+
+def _save_state(state_path: Path, config_file: str | Path | None,
+                session_date: str, job_summaries: dict) -> None:
+    """Save the current execution state atomically to JSON."""
+    serializable_jobs = {}
+    for name, info in job_summaries.items():
+        serializable_jobs[name] = {
+            "status": info.get("status"),
+            "duration": info.get("duration")
+        }
+
+    data = {
+        "config_file": str(config_file) if config_file is not None else None,
+        "session_date": session_date,
+        "jobs": serializable_jobs
+    }
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_fd, temp_path = tempfile.mkstemp(dir=str(state_path.parent),
+                                          prefix="lbs_state_",
+                                          suffix=".tmp")
+    try:
+        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, str(state_path))
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 
 class Scheduler:
@@ -21,6 +59,8 @@ class Scheduler:
         config: Config,
         job_filter: list[str] | str | None = None,
         dry_run: bool = False,
+        resume: str | None = None,
+        config_path: str | Path | None = None,
     ) -> bool:
         """
         Main sequential execution loop for LBS jobs.
@@ -57,13 +97,69 @@ class Scheduler:
         else:
             jobs_to_run = {job.name for job in config.jobs}
 
+        # Resolve resume state if configured
+        state_path = Path(config.settings.log_dir) / "lbs_state.json"
+        succeeded_jobs = set()
+        session_date = None
+        saved_summaries = {}
+
+        if resume == "latest":
+            if not state_path.is_file():
+                raise ValueError("No active session state found to resume.")
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state_data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                raise ValueError(f"Failed to load session state: {e}") from e
+
+            if not isinstance(state_data, dict):
+                raise ValueError("Failed to load session state: state file content is not a JSON object")
+
+            saved_summaries = state_data.get("jobs")
+            if not isinstance(saved_summaries, dict):
+                raise ValueError("Failed to load session state: 'jobs' field is missing or not a JSON object")
+
+            session_date = state_data.get("session_date")
+            if not isinstance(session_date, str):
+                raise ValueError("Failed to load session state: 'session_date' field is missing or not a string")
+
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
+                raise ValueError(
+                    f"Failed to load session state: invalid session_date format '{session_date}'"
+                )
+
+            succeeded_jobs = {
+                name
+                for name, info in saved_summaries.items()
+                if isinstance(info, dict) and info.get("status") == "SUCCESS"
+            }
+
+            # If all selected jobs are already succeeded:
+            selected_succeeded = all(
+                (
+                    isinstance(saved_summaries.get(name), dict)
+                    and saved_summaries[name].get("status") == "SUCCESS"
+                )
+                for name in jobs_to_run
+            )
+            if selected_succeeded:
+                print(
+                    "All selected jobs in the previous session completed successfully. Nothing to resume."
+                )
+                return True
+
         if dry_run:
             print("Dry-Run Execution Plan")
             print("======================")
             print(f"Log Directory: {config.settings.log_dir}")
+            if resume == "latest":
+                print("Resuming Session from latest state")
             print()
             for job in config.jobs:
                 if job.name not in jobs_to_run:
+                    continue
+                if job.name in succeeded_jobs:
+                    print(f"Job: {job.name} [ALREADY SUCCEEDED]")
                     continue
                 print(f"Job: {job.name}")
                 print(f"  CWD: {job.cwd}")
@@ -89,18 +185,29 @@ class Scheduler:
 
         lock_path = log_dir / "lbs.lock"
         with FileLock(lock_path):
-            session_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            if resume == "latest":
+                if session_date is None:
+                    session_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            else:
+                session_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
             session_log_path = log_dir / f"{session_date}_session.log"
 
-            # Track execution details for summary
-            # Format: {job_name: {"status": "SUCCESS" | "FAILED" | "SKIPPED", "duration": float | None}}
-            job_summaries = {
-                job.name: {
-                    "status": "SKIPPED",
-                    "duration": None
-                }
-                for job in config.jobs
-            }
+            # Reconstruct job summaries from state if resuming
+            job_summaries = {}
+            for job in config.jobs:
+                if resume == "latest" and job.name in succeeded_jobs:
+                    job_info = saved_summaries.get(job.name, {})
+                    job_summaries[job.name] = {
+                        "status": "SUCCESS",
+                        "duration": job_info.get("duration")
+                    }
+                else:
+                    job_summaries[job.name] = {
+                        "status":
+                        "PENDING" if job.name in jobs_to_run else "SKIPPED",
+                        "duration": None
+                    }
 
             overall_success = True
             aborted = False
@@ -112,14 +219,27 @@ class Scheduler:
                 with open(session_log_path, "a", encoding="utf-8") as f:
                     f.write(formatted_msg)
 
-            log_to_session("--- Session started ---")
+            if resume == "latest":
+                log_to_session("--- Session resumed ---")
+            else:
+                log_to_session("--- Session started ---")
+
             log_to_session(
                 f"Settings: stop_on_failure={config.settings.stop_on_failure}, log_dir={config.settings.log_dir}"
             )
 
+            # Save initial state if not resuming
+            if resume != "latest":
+                _save_state(state_path, config_path, session_date,
+                            job_summaries)
+
             for job in config.jobs:
                 if job.name not in jobs_to_run:
-                    # Not selected by the job filter, leave as SKIPPED
+                    # Not selected by the job filter, leave as initialized
+                    continue
+
+                if job_summaries[job.name]["status"] == "SUCCESS":
+                    # Already succeeded in previous run of this session! Skip it.
                     continue
 
                 if aborted:
@@ -127,10 +247,20 @@ class Scheduler:
                         "status": "SKIPPED",
                         "duration": None
                     }
+                    _save_state(state_path, config_path, session_date,
+                                job_summaries)
                     continue
 
                 log_to_session(f"Starting job: {job.name} (cwd: {job.cwd})")
                 job_log_path = log_dir / f"{session_date}_{job.name}.log"
+
+                # Mark as PENDING during execution
+                job_summaries[job.name] = {
+                    "status": "PENDING",
+                    "duration": None
+                }
+                _save_state(state_path, config_path, session_date,
+                            job_summaries)
 
                 job_success = False
                 job_duration = 0.0
@@ -230,6 +360,9 @@ class Scheduler:
                         )
                         aborted = True
 
+                _save_state(state_path, config_path, session_date,
+                            job_summaries)
+
             summary_lines = [
                 "",
                 "=" * 50,
@@ -254,7 +387,7 @@ class Scheduler:
             failed_count = sum(1 for s in job_summaries.values()
                                if s["status"] == "FAILED")
             skipped_count = sum(1 for s in job_summaries.values()
-                                if s["status"] == "SKIPPED")
+                                if s["status"] in ("SKIPPED", "PENDING"))
 
             # Format elapsed duration to HH:MM:SS
             elapsed_time = time.perf_counter() - session_start_time
