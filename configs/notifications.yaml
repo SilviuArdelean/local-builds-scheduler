@@ -1,0 +1,27 @@
+# Local Builds Scheduler (LBS) - Notifications Configuration
+# Place this file in your CWD as notifications.yaml to load it automatically, or specify its path using the -n flag.
+# Credentials and hooks configured here override/merge with settings in the main config file.
+
+# General triggers (defaults to true if omitted)
+on_success: true
+on_failure: true
+
+# Desktop balloon alerts (via PowerShell on Windows)
+desktop: false
+
+# Slack webhook endpoint URL
+# slack_webhook: "${LBS_SLACK_WEBHOOK}"
+
+# Discord webhook endpoint URL
+# discord_webhook: "${LBS_DISCORD_WEBHOOK}"
+
+# SMTP Email notification configurations
+# email:
+#   smtp_host: "smtp.gmail.com"
+#   smtp_port: 587
+#   smtp_username: "${LBS_SMTP_USERNAME}"
+#   smtp_password: "${LBS_SMTP_PASSWORD}"
+#   use_tls: true
+#   sender: "lbs-scheduler@builds.local"
+#   recipients:
+#     - "your-recipient@domain.com"

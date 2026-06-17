@@ -18,7 +18,13 @@ from lbs.utils.lock import LockError
 def cmd_run(args: argparse.Namespace) -> None:
     """Handle the 'lbs run <config>' subcommand."""
     try:
-        config = load_config(args.config)
+        config = load_config(args.config,
+                             notifications_path=getattr(
+                                 args, "notifications_config", None))
+        if config is not None:
+            if not getattr(args, "notifications", False):
+                config.settings.notifications.on_success = False
+                config.settings.notifications.on_failure = False
         if args.verbose:
             config.settings.verbose = True
         success = Scheduler.run(
@@ -45,7 +51,9 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_validate(args: argparse.Namespace) -> None:
     """Handle the 'lbs validate <config>' subcommand."""
     try:
-        load_config(args.config)
+        load_config(args.config,
+                    notifications_path=getattr(args, "notifications_config",
+                                               None))
         print("Configuration is valid.")
         sys.exit(0)
     except ConfigError as e:
@@ -86,6 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
         "run", help="Run all jobs defined in a config file.")
     run_parser.add_argument("config", help="Path to the YAML config file.")
     run_parser.add_argument(
+        "-n",
+        "--notifications-config",
+        help="Path to the separate YAML notifications config file.",
+    )
+    run_parser.add_argument(
+        "--notifications",
+        action="store_true",
+        help="Enable notifications for this run.",
+    )
+    run_parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -114,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     val_parser = subparsers.add_parser("validate",
                                        help="Validate a config file.")
     val_parser.add_argument("config", help="Path to the YAML config file.")
+    val_parser.add_argument(
+        "-n",
+        "--notifications-config",
+        help="Path to the separate YAML notifications config file.",
+    )
     val_parser.set_defaults(func=cmd_validate)
 
     # lbs list <config>

@@ -93,6 +93,51 @@ jobs:
 
 The schema is intentionally simple: define jobs, define where they run, define the commands.
 
+### Notifications & Private Configurations
+
+To prevent sensitive SMTP passwords or webhook URLs from being checked into source control alongside build jobs, you can keep them in a separate configuration file and load them selectively:
+
+1. **Explicit file location**:
+   ```bash
+   lbs run configs/build-config.yaml -n configs/notifications.yaml --notifications
+   ```
+2. **Implicit fallback**: If no notifications config path is specified, the tool automatically looks for a default `notifications.yaml` in the current working directory.
+
+#### Configuration Schema (`notifications.yaml`)
+
+Notifications settings can be defined at the root level or nested under a `notifications` block:
+
+```yaml
+on_success: false   # Disables notifications on successful runs
+on_failure: true    # Dispatches alerts if any job fails
+desktop: true       # Triggers native OS balloon tip notifications (Windows only)
+
+# Slack Incoming Webhook
+slack_webhook: "${LBS_SLACK_WEBHOOK}"
+
+# Discord Incoming Webhook
+discord_webhook: "${LBS_DISCORD_WEBHOOK}"
+
+# SMTP Email Summary configuration
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_username: "${LBS_SMTP_USERNAME}"
+  smtp_password: "${LBS_SMTP_PASSWORD}"
+  use_tls: true
+  sender: "lbs-scheduler@builds.local"
+  recipients:
+    - "your-email@domain.com"
+```
+
+#### Environment Variable Interpolation
+
+To keep credentials completely secure, any string value in your configuration files can reference environment variables in the format `${VAR_NAME}` or `$VAR_NAME`. 
+
+These placeholders are automatically resolved from your environment when the configuration is loaded:
+- In the example above, `${LBS_SMTP_PASSWORD}` resolves to the value of the environment variable `LBS_SMTP_PASSWORD`.
+- If an environment variable is unset, it defaults to an empty string `""`.
+
 ## Logging
 
 Logging is a core feature.
@@ -235,11 +280,18 @@ lbs run <config-path> [options]
 **Options:**
 * `-v`, `--verbose` — Mirror command execution stdout/stderr directly to standard output (in addition to the log files).
 * `-j <job-name>`, `--job <job-name>` — Run only the specified job. Can be specified multiple times to execute a subset of jobs (e.g. `lbs run config.yaml -j workspace-a -j workspace-c`).
+* `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
+* `--resume latest` — Resume a failed or interrupted session from the latest saved state (`lbs_state.json`), executing only the failed or skipped jobs.
+* `-n <path>`, `--notifications-config <path>` — Path to a separate YAML file containing private notification settings (e.g. SMTP credentials, Slack/Discord webhooks) to merge with the main config.
+* `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
 
 #### `validate`
 Check if the provided configuration file exists, is valid YAML, and conforms to the schema.
 ```bash
-lbs validate <config-path>
+lbs validate <config-path> [options]
+```
+**Options:**
+* `-n <path>`, `--notifications-config <path>` — Path to a separate YAML notifications configuration file to validate together with the main config.
 ```
 
 #### `list`
