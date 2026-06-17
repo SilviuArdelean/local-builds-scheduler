@@ -185,7 +185,7 @@ def test_config_retries_validation(tmp_path):
     """Verify that retries and retry_delay_seconds are validated properly."""
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
-    
+
     # 1. Negative retries should fail
     config_file1 = tmp_path / "bad_retries.yaml"
     config_file1.write_text(f"""
@@ -194,7 +194,8 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retries: -1
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file1)
     assert "retries' field must be a non-negative integer" in str(exc.value)
@@ -207,7 +208,8 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retries: 2.5
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file2)
     assert "retries' field must be a non-negative integer" in str(exc.value)
@@ -220,7 +222,8 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retries: true
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file3)
     assert "retries' field must be a non-negative integer" in str(exc.value)
@@ -233,10 +236,12 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retry_delay_seconds: -10
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file4)
-    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(
+        exc.value)
 
     # 5. Boolean retry_delay_seconds should fail
     config_file5 = tmp_path / "bad_delay_bool.yaml"
@@ -246,10 +251,12 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retry_delay_seconds: false
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file5)
-    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(
+        exc.value)
 
     # 5b. Infinite retry_delay_seconds should fail
     config_file5b = tmp_path / "bad_delay_inf.yaml"
@@ -259,10 +266,12 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retry_delay_seconds: .inf
-    """, encoding="utf-8")
+    """,
+                             encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file5b)
-    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(
+        exc.value)
 
     # 5c. NaN retry_delay_seconds should fail
     config_file5c = tmp_path / "bad_delay_nan.yaml"
@@ -272,10 +281,12 @@ def test_config_retries_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         retry_delay_seconds: .nan
-    """, encoding="utf-8")
+    """,
+                             encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file5c)
-    assert "retry_delay_seconds' field must be a non-negative finite number" in str(exc.value)
+    assert "retry_delay_seconds' field must be a non-negative finite number" in str(
+        exc.value)
 
     # 6. Valid float and integer parameters should load successfully
     config_file6 = tmp_path / "good_retries.yaml"
@@ -286,7 +297,8 @@ def test_config_retries_validation(tmp_path):
         commands: ["echo 1"]
         retries: 3
         retry_delay_seconds: 1.5
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     config = load_config(config_file6)
     assert config.jobs[0].retries == 3
     assert config.jobs[0].retry_delay_seconds == 1.5
@@ -305,10 +317,12 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: -10
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file1)
-    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(
+        exc.value)
 
     # 2. Zero timeout should fail
     config_file2 = tmp_path / "zero_timeout.yaml"
@@ -318,10 +332,12 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: 0
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file2)
-    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(
+        exc.value)
 
     # 3. Boolean timeout should fail
     config_file3 = tmp_path / "bool_timeout.yaml"
@@ -331,10 +347,12 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: true
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file3)
-    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(
+        exc.value)
 
     # 3b. Infinite timeout should fail
     config_file3b = tmp_path / "bad_timeout_inf.yaml"
@@ -344,10 +362,12 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: .inf
-    """, encoding="utf-8")
+    """,
+                             encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file3b)
-    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(
+        exc.value)
 
     # 3c. NaN timeout should fail
     config_file3c = tmp_path / "bad_timeout_nan.yaml"
@@ -357,10 +377,12 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: .nan
-    """, encoding="utf-8")
+    """,
+                             encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(config_file3c)
-    assert "command_timeout_minutes' field must be a positive finite number" in str(exc.value)
+    assert "command_timeout_minutes' field must be a positive finite number" in str(
+        exc.value)
 
     # 4. Valid timeout should load successfully
     config_file4 = tmp_path / "good_timeout.yaml"
@@ -370,6 +392,265 @@ def test_config_timeout_validation(tmp_path):
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
         command_timeout_minutes: 2.5
-    """, encoding="utf-8")
+    """,
+                            encoding="utf-8")
     config = load_config(config_file4)
     assert config.jobs[0].command_timeout_minutes == 2.5
+
+
+def test_config_notifications_validation(tmp_path):
+    """Verify that notification configuration options are parsed and validated properly."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    # 1. Valid notifications load
+    config_file1 = tmp_path / "good_notif.yaml"
+    config_file1.write_text(f"""
+    settings:
+      notifications:
+        on_success: false
+        desktop: true
+        slack_webhook: "https://hooks.slack.com/services/123"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """,
+                            encoding="utf-8")
+    config = load_config(config_file1)
+    notif = config.settings.notifications
+    assert notif.on_success is False
+    assert notif.on_failure is True  # Default
+    assert notif.desktop is True
+    assert notif.slack_webhook == "https://hooks.slack.com/services/123"
+    assert notif.discord_webhook is None
+
+    # 2. Invalid webhook type should fail
+    config_file2 = tmp_path / "bad_webhook_type.yaml"
+    config_file2.write_text(f"""
+    settings:
+      notifications:
+        slack_webhook: 12345
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """,
+                            encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file2)
+    assert "slack_webhook' notification setting must be a non-empty string or null" in str(
+        exc.value)
+
+    # 3. Invalid webhook URL scheme should fail
+    config_file3 = tmp_path / "bad_webhook_scheme.yaml"
+    config_file3.write_text(f"""
+    settings:
+      notifications:
+        discord_webhook: "ftp://discord.com/api"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """,
+                            encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3)
+    assert "discord_webhook' notification setting must be a valid http/https URL" in str(
+        exc.value)
+
+    # 4. Invalid boolean setting should fail
+    config_file4 = tmp_path / "bad_notif_bool.yaml"
+    config_file4.write_text(f"""
+    settings:
+      notifications:
+        on_failure: "yes"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """,
+                            encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file4)
+    assert "on_failure' notification setting must be a boolean" in str(
+        exc.value)
+
+
+def test_config_notifications_merge_override(tmp_path):
+    """Verify that values in a separate notifications file override/merge settings from the main config."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    settings:
+      notifications:
+        on_success: false
+        desktop: false
+        slack_webhook: "https://hooks.slack.com/services/original"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    notif_file = tmp_path / "notif_override.yaml"
+    notif_file.write_text("""
+    on_success: true
+    desktop: true
+    slack_webhook: "https://hooks.slack.com/services/overridden"
+    email:
+      smtp_host: "smtp.example.com"
+      sender: "sender@example.com"
+      recipients: ["user@example.com"]
+    """, encoding="utf-8")
+
+    config = load_config(config_file, notifications_path=notif_file)
+    notif = config.settings.notifications
+    assert notif.on_success is True
+    assert notif.on_failure is True  # preserved default
+    assert notif.desktop is True
+    assert notif.slack_webhook == "https://hooks.slack.com/services/overridden"
+    assert notif.email.smtp_host == "smtp.example.com"
+    assert notif.email.sender == "sender@example.com"
+    assert notif.email.recipients == ["user@example.com"]
+
+
+def test_config_notifications_merge_wrapped(tmp_path):
+    """Verify that notifications config with a root 'notifications' key is merged correctly."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    notif_file = tmp_path / "notif_wrapped.yaml"
+    notif_file.write_text("""
+    notifications:
+      desktop: true
+      slack_webhook: "https://hooks.slack.com/services/wrapped"
+    """, encoding="utf-8")
+
+    config = load_config(config_file, notifications_path=notif_file)
+    notif = config.settings.notifications
+    assert notif.desktop is True
+    assert notif.slack_webhook == "https://hooks.slack.com/services/wrapped"
+
+
+def test_config_notifications_default_cwd(tmp_path, monkeypatch):
+    """Verify that default notifications.yaml in CWD is automatically loaded and merged."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    # Move working directory to tmp_path
+    monkeypatch.chdir(tmp_path)
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    default_notif_file = tmp_path / "notifications.yaml"
+    default_notif_file.write_text("""
+    desktop: true
+    """, encoding="utf-8")
+
+    config = load_config(config_file)
+    assert config.settings.notifications.desktop is True
+
+
+def test_config_notifications_missing_file(tmp_path):
+    """Verify that a non-existent explicit notifications file path raises ConfigError."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(
+            config_file,
+            notifications_path=tmp_path / "non_existent_notif.yaml",
+        )
+    assert "Notifications config file does not exist" in str(exc.value)
+
+
+def test_config_notifications_malformed_yaml(tmp_path):
+    """Verify that a malformed notifications YAML file raises ConfigError."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    notif_file = tmp_path / "malformed.yaml"
+    notif_file.write_text("invalid_key: [unclosed_brace", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file, notifications_path=notif_file)
+    assert "Invalid notifications YAML syntax" in str(exc.value)
+
+
+def test_config_notifications_not_a_dict(tmp_path):
+    """Verify that a notifications file that is not a dictionary raises ConfigError."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "main_config.yaml"
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    notif_file = tmp_path / "not_dict.yaml"
+    notif_file.write_text("- list_item", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file, notifications_path=notif_file)
+    assert "Notifications configuration must be a YAML dictionary" in str(exc.value)
+
+
+def test_config_env_var_interpolation(tmp_path, monkeypatch):
+    """Verify that environment variables referenced via ${VAR} or $VAR are interpolated in the config."""
+    monkeypatch.setenv("TEST_LBS_LOG_DIR", "env_logs")
+    monkeypatch.setenv("TEST_LBS_WEBHOOK", "https://hooks.slack.com/services/env")
+
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_file = tmp_path / "env_config.yaml"
+    config_file.write_text(f"""
+    settings:
+      log_dir: "${{TEST_LBS_LOG_DIR}}"
+      notifications:
+        slack_webhook: "$TEST_LBS_WEBHOOK"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    config = load_config(config_file)
+    assert config.settings.log_dir == "env_logs"
+    assert config.settings.notifications.slack_webhook == "https://hooks.slack.com/services/env"

@@ -113,15 +113,21 @@ class Scheduler:
                 raise ValueError(f"Failed to load session state: {e}") from e
 
             if not isinstance(state_data, dict):
-                raise ValueError("Failed to load session state: state file content is not a JSON object")
+                raise ValueError(
+                    "Failed to load session state: state file content is not a JSON object"
+                )
 
             saved_summaries = state_data.get("jobs")
             if not isinstance(saved_summaries, dict):
-                raise ValueError("Failed to load session state: 'jobs' field is missing or not a JSON object")
+                raise ValueError(
+                    "Failed to load session state: 'jobs' field is missing or not a JSON object"
+                )
 
             session_date = state_data.get("session_date")
             if not isinstance(session_date, str):
-                raise ValueError("Failed to load session state: 'session_date' field is missing or not a string")
+                raise ValueError(
+                    "Failed to load session state: 'session_date' field is missing or not a string"
+                )
 
             if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
                 raise ValueError(
@@ -136,10 +142,8 @@ class Scheduler:
 
             # If all selected jobs are already succeeded:
             selected_succeeded = all(
-                (
-                    isinstance(saved_summaries.get(name), dict)
-                    and saved_summaries[name].get("status") == "SUCCESS"
-                )
+                isinstance(saved_summaries.get(name), dict)
+                and saved_summaries[name].get("status") == "SUCCESS"
                 for name in jobs_to_run
             )
             if selected_succeeded:
@@ -415,6 +419,18 @@ class Scheduler:
                 f.write(summary_text)
 
             log_to_session(f"--- Session ended (status: {session_status}) ---")
+
+            # Dispatch notification callbacks
+            from lbs.utils.notifier import dispatch_notifications
+            dispatch_notifications(
+                settings=config.settings,
+                success=overall_success,
+                passed_count=passed_count,
+                failed_count=failed_count,
+                skipped_count=skipped_count,
+                duration_str=duration_str,
+                job_summaries=job_summaries,
+            )
 
             return overall_success
 

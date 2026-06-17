@@ -193,3 +193,78 @@ def test_cli_run_invalid_config(tmp_path):
     assert result.returncode == 2
     assert "Error:" in result.stderr
 
+
+def test_cli_validate_with_notifications(tmp_path):
+    """Running 'lbs validate' with -n and a valid notifications config should exit with code 0."""
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    yaml_content = f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    notif_file = tmp_path / "notif.yaml"
+    notif_file.write_text("""
+    desktop: true
+    """, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lbs",
+            "validate",
+            str(config_file),
+            "-n",
+            str(notif_file),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "Configuration is valid" in result.stdout
+
+
+def test_cli_run_notifications_opt_in(tmp_path):
+    """Running 'lbs run' with --notifications should execute jobs normally and exit with code 0."""
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    # Verify that run works with --notifications
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--notifications"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "LBS Session Summary" in result.stdout
+
+    # Verify that run also works without the flag (notifications are disabled by default)
+    result_default = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result_default.returncode == 0
+    assert "LBS Session Summary" in result_default.stdout
+
