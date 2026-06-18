@@ -12,7 +12,8 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from lbs.config import Config
+
+from lbs.config import Config, Job
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
 
@@ -49,6 +50,252 @@ def _save_state(state_path: Path, config_file: str | Path | None,
             except OSError:
                 pass
         raise
+
+
+def _parse_and_validate_resume_state(state_path: Path) -> tuple[str, dict]:
+    """Loads, validates, and returns (session_date, saved_summaries)
+    from the state file.
+    """
+    if not state_path.is_file():
+        raise ValueError("No active session state found to resume.")
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            state_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Failed to load session state: {e}") from e
+
+    if not isinstance(state_data, dict):
+        raise ValueError(
+            "Failed to load session state: state file content is not a JSON object"
+        )
+
+    saved_summaries = state_data.get("jobs")
+    if not isinstance(saved_summaries, dict):
+        raise ValueError(
+            "Failed to load session state: 'jobs' field is missing or not a JSON object"
+        )
+
+    session_date = state_data.get("session_date")
+    if not isinstance(session_date, str):
+        raise ValueError(
+            "Failed to load session state: 'session_date' field is missing or not a string"
+        )
+
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
+        raise ValueError(
+            f"Failed to load session state: invalid session_date format '{session_date}'"
+        )
+
+    return session_date, saved_summaries
+
+
+def _print_dry_run_plan(
+    config: Config,
+    jobs_to_run: set[str],
+    succeeded_jobs: set[str],
+    resume: str | None,
+) -> None:
+    """Prints the dry-run execution plan to standard output."""
+    print("Dry-Run Execution Plan")
+    print("======================")
+    print(f"Log Directory: {config.settings.log_dir}")
+    if resume == "latest":
+        print("Resuming Session from latest state")
+    print()
+    for job in config.jobs:
+        if job.name not in jobs_to_run:
+            continue
+        if job.name in succeeded_jobs:
+            print(f"Job: {job.name} [ALREADY SUCCEEDED]")
+            continue
+        print(f"Job: {job.name}")
+        print(f"  CWD: {job.cwd}")
+        env_str = (", ".join(
+            f"{k}={v}"
+            for k, v in job.env.items()) if job.env else "None")
+        print(f"  Environment: {env_str}")
+        if job.retries > 0:
+            print(
+                f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)"
+            )
+        if job.command_timeout_minutes is not None:
+            print(f"  Timeout: {job.command_timeout_minutes}m")
+        print("  Commands:")
+        for cmd in job.commands:
+            print(f"    - {cmd}")
+        print()
+
+
+def _execute_job_attempt(
+    job: Job,
+    verbose: bool,
+    attempt: int,
+    total_attempts: int,
+    job_log_path: Path,
+    log_to_session,
+) -> bool:
+    """Executes all commands of a job in a single attempt, logging outputs."""
+    job_success = True
+    with open(job_log_path, "a", encoding="utf-8") as job_log:
+
+        def log_to_job(msg: str) -> None:
+            now = datetime.datetime.now()
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            job_log.write(f"[{timestamp}] {msg}\n")
+            job_log.flush()
+
+        if attempt > 1:
+            log_to_job(
+                f"--- Retry Attempt {attempt - 1} / {job.retries} ---"
+            )
+        else:
+            log_to_job(f"Job '{job.name}' started")
+            log_to_job(f"CWD: {job.cwd}")
+            log_to_job(f"Environment overlays: {job.env}")
+
+        executor = JobExecutor(verbose=verbose)
+
+        for cmd in job.commands:
+            log_to_job(f"Executing command: {cmd}")
+            if job.command_timeout_minutes is not None:
+                timeout_sec = job.command_timeout_minutes * 60
+            else:
+                timeout_sec = None
+            result = executor.run_command(
+                cmd,
+                cwd=job.cwd,
+                env=job.env,
+                log_file=job_log,
+                timeout=timeout_sec,
+            )
+
+            if not result.success:
+                if attempt < total_attempts:
+                    status_label = "ATTEMPT FAILED"
+                else:
+                    status_label = "FAILED"
+                if result.error_message:
+                    log_to_job(
+                        f"Process execution error: {result.error_message}"
+                    )
+                    log_to_session(
+                        f"Job {job.name}: {status_label} "
+                        f"(Command '{cmd}' failed: {result.error_message})"
+                    )
+                else:
+                    log_to_job(
+                        f"Command failed with exit code {result.exit_code}"
+                    )
+                    log_to_session(
+                        f"Job {job.name}: {status_label} "
+                        f"(Command '{cmd}' failed with exit code "
+                        f"{result.exit_code})"
+                    )
+                job_success = False
+                break
+            else:
+                log_to_job("Command succeeded")
+
+    return job_success
+
+
+def _run_single_job(
+    job: Job,
+    verbose: bool,
+    log_dir: Path,
+    session_date: str,
+    log_to_session,
+) -> tuple[bool, float]:
+    """
+    Executes the commands inside a single job, coordinating retries and log files.
+    Does not mutate scheduler orchestration state.
+    """
+    job_log_path = log_dir / f"{session_date}_{job.name}.log"
+    job_success = False
+    job_duration = 0.0
+    total_attempts = 1 + job.retries
+
+    for attempt in range(1, total_attempts + 1):
+        job_start_time = time.perf_counter()
+
+        job_success = _execute_job_attempt(
+            job=job,
+            verbose=verbose,
+            attempt=attempt,
+            total_attempts=total_attempts,
+            job_log_path=job_log_path,
+            log_to_session=log_to_session,
+        )
+
+        job_duration += time.perf_counter() - job_start_time
+
+        if job_success:
+            break
+        else:
+            if attempt < total_attempts:
+                log_to_session(
+                    f"Job {job.name} failed. Retrying in "
+                    f"{job.retry_delay_seconds} seconds "
+                    f"(attempt {attempt}/{job.retries})..."
+                )
+                time.sleep(job.retry_delay_seconds)
+
+    return job_success, job_duration
+
+
+def _build_summary_text(
+    job_summaries: dict,
+    overall_success: bool,
+    elapsed_time: float,
+) -> tuple[str, str, int, int, int]:
+    """Constructs the formatted multi-line summary string and counts statistics."""
+    summary_lines = [
+        "",
+        "=" * 50,
+        "              LBS Session Summary",
+        "=" * 50,
+    ]
+    for name, summary in job_summaries.items():
+        status = summary["status"]
+        dur = summary["duration"]
+        dur_str = f"{dur:.2f}s" if dur is not None else "-"
+        summary_lines.append(
+            f"Job: {name:<20} ->  {status:<10} ({dur_str})")
+    summary_lines.append("=" * 50)
+
+    session_status = "SUCCESS" if overall_success else "FAILED"
+    summary_lines.append(f"Session completed: {session_status}")
+    summary_lines.append("")
+
+    passed_count = sum(
+        1 for s in job_summaries.values() if s["status"] == "SUCCESS"
+    )
+    failed_count = sum(
+        1 for s in job_summaries.values() if s["status"] == "FAILED"
+    )
+    skipped_count = sum(
+        1 for s in job_summaries.values()
+        if s["status"] in ("SKIPPED", "PENDING")
+    )
+
+    total_seconds = int(elapsed_time)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    summary_lines.extend([
+        "Run Summary",
+        "-----------",
+        f"Passed: {passed_count}",
+        f"Failed: {failed_count}",
+        f"Skipped: {skipped_count}",
+        f"Duration: {duration_str}",
+        "",
+    ])
+
+    summary_text = "\n".join(summary_lines)
+    return summary_text, duration_str, passed_count, failed_count, skipped_count
 
 
 class Scheduler:
@@ -104,36 +351,7 @@ class Scheduler:
         saved_summaries = {}
 
         if resume == "latest":
-            if not state_path.is_file():
-                raise ValueError("No active session state found to resume.")
-            try:
-                with open(state_path, "r", encoding="utf-8") as f:
-                    state_data = json.load(f)
-            except (OSError, json.JSONDecodeError) as e:
-                raise ValueError(f"Failed to load session state: {e}") from e
-
-            if not isinstance(state_data, dict):
-                raise ValueError(
-                    "Failed to load session state: state file content is not a JSON object"
-                )
-
-            saved_summaries = state_data.get("jobs")
-            if not isinstance(saved_summaries, dict):
-                raise ValueError(
-                    "Failed to load session state: 'jobs' field is missing or not a JSON object"
-                )
-
-            session_date = state_data.get("session_date")
-            if not isinstance(session_date, str):
-                raise ValueError(
-                    "Failed to load session state: 'session_date' field is missing or not a string"
-                )
-
-            if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
-                raise ValueError(
-                    f"Failed to load session state: invalid session_date format '{session_date}'"
-                )
-
+            session_date, saved_summaries = _parse_and_validate_resume_state(state_path)
             succeeded_jobs = {
                 name
                 for name, info in saved_summaries.items()
@@ -153,34 +371,7 @@ class Scheduler:
                 return True
 
         if dry_run:
-            print("Dry-Run Execution Plan")
-            print("======================")
-            print(f"Log Directory: {config.settings.log_dir}")
-            if resume == "latest":
-                print("Resuming Session from latest state")
-            print()
-            for job in config.jobs:
-                if job.name not in jobs_to_run:
-                    continue
-                if job.name in succeeded_jobs:
-                    print(f"Job: {job.name} [ALREADY SUCCEEDED]")
-                    continue
-                print(f"Job: {job.name}")
-                print(f"  CWD: {job.cwd}")
-                env_str = (", ".join(
-                    f"{k}={v}"
-                    for k, v in job.env.items()) if job.env else "None")
-                print(f"  Environment: {env_str}")
-                if job.retries > 0:
-                    print(
-                        f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)"
-                    )
-                if job.command_timeout_minutes is not None:
-                    print(f"  Timeout: {job.command_timeout_minutes}m")
-                print("  Commands:")
-                for cmd in job.commands:
-                    print(f"    - {cmd}")
-                print()
+            _print_dry_run_plan(config, jobs_to_run, succeeded_jobs, resume)
             return True
 
         # Initialize filesystem logs
@@ -256,7 +447,6 @@ class Scheduler:
                     continue
 
                 log_to_session(f"Starting job: {job.name} (cwd: {job.cwd})")
-                job_log_path = log_dir / f"{session_date}_{job.name}.log"
 
                 # Mark as PENDING during execution
                 job_summaries[job.name] = {
@@ -266,83 +456,14 @@ class Scheduler:
                 _save_state(state_path, config_path, session_date,
                             job_summaries)
 
-                job_success = False
-                job_duration = 0.0
-                total_attempts = 1 + job.retries
-
-                for attempt in range(1, total_attempts + 1):
-                    job_start_time = time.perf_counter()
-                    job_success = True
-
-                    # Open job log in append mode, with line buffering or explicit flushing
-                    with open(job_log_path, "a", encoding="utf-8") as job_log:
-
-                        def log_to_job(msg: str) -> None:
-                            timestamp = datetime.datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S")
-                            job_log.write(f"[{timestamp}] {msg}\n")
-                            job_log.flush()
-
-                        if attempt > 1:
-                            log_to_job(
-                                f"--- Retry Attempt {attempt - 1} / {job.retries} ---"
-                            )
-                        else:
-                            log_to_job(f"Job '{job.name}' started")
-                            log_to_job(f"CWD: {job.cwd}")
-                            log_to_job(f"Environment overlays: {job.env}")
-
-                        # Initialize executor for this job execution
-                        verbose_mode = getattr(config.settings, "verbose",
-                                               False)
-                        executor = JobExecutor(verbose=verbose_mode)
-
-                        # Sequentially run commands
-                        for cmd in job.commands:
-                            log_to_job(f"Executing command: {cmd}")
-
-                            # Run command via JobExecutor
-                            timeout_sec = (job.command_timeout_minutes *
-                                           60 if job.command_timeout_minutes
-                                           is not None else None)
-                            result = executor.run_command(cmd,
-                                                          cwd=job.cwd,
-                                                          env=job.env,
-                                                          log_file=job_log,
-                                                          timeout=timeout_sec)
-
-                            if not result.success:
-                                status_label = "ATTEMPT FAILED" if attempt < total_attempts else "FAILED"
-                                if result.error_message:
-                                    log_to_job(
-                                        f"Process execution error: {result.error_message}"
-                                    )
-                                    log_to_session(
-                                        f"Job {job.name}: {status_label} (Command '{cmd}' failed: {result.error_message})"
-                                    )
-                                else:
-                                    log_to_job(
-                                        f"Command failed with exit code {result.exit_code}"
-                                    )
-                                    log_to_session(
-                                        f"Job {job.name}: {status_label} (Command '{cmd}' failed with exit code {result.exit_code})"
-                                    )
-                                job_success = False
-                                break
-                            else:
-                                log_to_job("Command succeeded")
-
-                    # Calculate duration for this attempt, adding to total execution duration
-                    job_duration += time.perf_counter() - job_start_time
-
-                    if job_success:
-                        break
-                    else:
-                        if attempt < total_attempts:
-                            log_to_session(
-                                f"Job {job.name} failed. Retrying in {job.retry_delay_seconds} seconds (attempt {attempt}/{job.retries})..."
-                            )
-                            time.sleep(job.retry_delay_seconds)
+                verbose_mode = getattr(config.settings, "verbose", False)
+                job_success, job_duration = _run_single_job(
+                    job=job,
+                    verbose=verbose_mode,
+                    log_dir=log_dir,
+                    session_date=session_date,
+                    log_to_session=log_to_session,
+                )
 
                 if job_success:
                     log_to_session(
@@ -367,51 +488,19 @@ class Scheduler:
                 _save_state(state_path, config_path, session_date,
                             job_summaries)
 
-            summary_lines = [
-                "",
-                "=" * 50,
-                "              LBS Session Summary",
-                "=" * 50,
-            ]
-            for name, summary in job_summaries.items():
-                status = summary["status"]
-                dur = summary["duration"]
-                dur_str = f"{dur:.2f}s" if dur is not None else "-"
-                summary_lines.append(
-                    f"Job: {name:<20} ->  {status:<10} ({dur_str})")
-            summary_lines.append("=" * 50)
-
-            session_status = "SUCCESS" if overall_success else "FAILED"
-            summary_lines.append(f"Session completed: {session_status}")
-            summary_lines.append("")
-
-            # Count job statuses for the final summary
-            passed_count = sum(1 for s in job_summaries.values()
-                               if s["status"] == "SUCCESS")
-            failed_count = sum(1 for s in job_summaries.values()
-                               if s["status"] == "FAILED")
-            skipped_count = sum(1 for s in job_summaries.values()
-                                if s["status"] in ("SKIPPED", "PENDING"))
-
-            # Format elapsed duration to HH:MM:SS
             elapsed_time = time.perf_counter() - session_start_time
-            total_seconds = int(elapsed_time)
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
-            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-            summary_lines.extend([
-                "Run Summary",
-                "-----------",
-                f"Passed: {passed_count}",
-                f"Failed: {failed_count}",
-                f"Skipped: {skipped_count}",
-                f"Duration: {duration_str}",
-                "",
-            ])
-
-            summary_text = "\n".join(summary_lines)
+            (
+                summary_text,
+                duration_str,
+                passed_count,
+                failed_count,
+                skipped_count,
+            ) = _build_summary_text(
+                job_summaries=job_summaries,
+                overall_success=overall_success,
+                elapsed_time=elapsed_time,
+            )
+            session_status = "SUCCESS" if overall_success else "FAILED"
 
             print(summary_text)
 
