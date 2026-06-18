@@ -71,6 +71,252 @@ class Config:
     jobs: list[Job]
 
 
+def _validate_job_metadata(
+    job_data: dict,
+    idx: int,
+    seen_names: set[str],
+) -> str:
+    """Validates the job name and checks for duplicates, returning the name."""
+    if "name" not in job_data:
+        raise ConfigError(
+            f"Job at index {idx} is missing the 'name' field"
+        )
+    name = job_data["name"]
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigError(
+            f"Job name at index {idx} must be a non-empty string"
+        )
+    if name in seen_names:
+        raise ConfigError(f"Duplicate job name: '{name}'")
+    seen_names.add(name)
+    return name
+
+
+def _validate_job_cwd_and_commands(job_data: dict, name: str) -> None:
+    """Validates the cwd and commands list for a job."""
+    # Working Directory (CWD)
+    if "cwd" not in job_data:
+        raise ConfigError(f"Job '{name}' is missing 'cwd' field")
+    cwd = job_data["cwd"]
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise ConfigError(
+            f"Job '{name}' 'cwd' field must be a non-empty string"
+        )
+    if not Path(cwd).is_dir():
+        raise ConfigError(
+            f"Job '{name}' 'cwd' directory does not exist: {cwd}"
+        )
+
+    # Commands list
+    if "commands" not in job_data:
+        raise ConfigError(f"Job '{name}' is missing 'commands' field")
+    commands = job_data["commands"]
+    if not isinstance(commands, list):
+        raise ConfigError(f"Job '{name}' 'commands' must be a list")
+    if not commands:
+        raise ConfigError(f"Job '{name}' 'commands' list cannot be empty")
+    for c_idx, cmd in enumerate(commands):
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ConfigError(
+                f"Job '{name}' command at index {c_idx} must be a non-empty string"
+            )
+
+
+def _validate_job_options(job_data: dict, name: str) -> None:
+    """Validates optional job settings like env overlays, retries, and timeouts."""
+    # Environment Variables (Optional)
+    if "env" in job_data:
+        env = job_data["env"]
+        if not isinstance(env, dict):
+            raise ConfigError(
+                f"Job '{name}' 'env' field must be a dictionary"
+            )
+        for k, v in env.items():
+            if not isinstance(k, str):
+                raise ConfigError(
+                    f"Job '{name}' 'env' key '{k}' must be a string"
+                )
+            if not isinstance(v, str):
+                raise ConfigError(
+                    f"Job '{name}' 'env' value for '{k}' must be a string"
+                )
+
+    # Retries (Optional)
+    if "retries" in job_data:
+        retries = job_data["retries"]
+        if (
+            not isinstance(retries, int)
+            or isinstance(retries, bool)
+            or retries < 0
+        ):
+            raise ConfigError(
+                f"Job '{name}' 'retries' field must be a non-negative integer"
+            )
+
+    # Retry Delay Seconds (Optional)
+    if "retry_delay_seconds" in job_data:
+        delay = job_data["retry_delay_seconds"]
+        if (
+            not isinstance(delay, (int, float))
+            or isinstance(delay, bool)
+            or not math.isfinite(delay)
+            or delay < 0
+        ):
+            raise ConfigError(
+                f"Job '{name}' 'retry_delay_seconds' field must be a non-negative finite number"
+            )
+
+    # Command Timeout Minutes (Optional)
+    if "command_timeout_minutes" in job_data:
+        timeout = job_data["command_timeout_minutes"]
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ConfigError(
+                f"Job '{name}' 'command_timeout_minutes' field must be a positive finite number"
+            )
+
+
+def _validate_job(job_data: dict, idx: int, seen_names: set[str]) -> None:
+    if not isinstance(job_data, dict):
+        raise ConfigError(f"Job at index {idx} must be a dictionary")
+
+    name = _validate_job_metadata(job_data, idx, seen_names)
+    _validate_job_cwd_and_commands(job_data, name)
+    _validate_job_options(job_data, name)
+
+
+def _validate_email_config(email_data: dict) -> None:
+    """Validates the SMTP and recipients configuration for email notifications."""
+    if not isinstance(email_data, dict):
+        raise ConfigError(
+            "'email' notification setting must be a dictionary or null"
+        )
+
+    # Validate host
+    if "smtp_host" not in email_data:
+        raise ConfigError(
+            "Missing 'smtp_host' in email notification configuration"
+        )
+    host = email_data["smtp_host"]
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError(
+            "'smtp_host' email setting must be a non-empty string"
+        )
+
+    # Validate port
+    if "smtp_port" in email_data:
+        port = email_data["smtp_port"]
+        if not isinstance(port, int) or isinstance(
+                port, bool) or port <= 0:
+            raise ConfigError(
+                "'smtp_port' email setting must be a positive integer"
+            )
+
+    # Validate username and password
+    for field_name in ["smtp_username", "smtp_password"]:
+        if field_name in email_data:
+            val = email_data[field_name]
+            if val is not None and (not isinstance(val, str)
+                                    or not val.strip()):
+                raise ConfigError(
+                    f"'{field_name}' email setting must be a string or null"
+                )
+
+    # Validate use_tls
+    if "use_tls" in email_data:
+        if not isinstance(email_data["use_tls"], bool):
+            raise ConfigError(
+                "'use_tls' email setting must be a boolean")
+
+    # Validate sender
+    if "sender" not in email_data:
+        raise ConfigError(
+            "Missing 'sender' in email notification configuration"
+        )
+    sender = email_data["sender"]
+    if not isinstance(sender, str) or not sender.strip():
+        raise ConfigError(
+            "'sender' email setting must be a non-empty string"
+        )
+
+    # Validate recipients
+    if "recipients" not in email_data:
+        raise ConfigError(
+            "Missing 'recipients' in email notification configuration"
+        )
+    recipients = email_data["recipients"]
+    if not isinstance(recipients, list):
+        raise ConfigError(
+            "'recipients' email setting must be a list")
+    if not recipients:
+        raise ConfigError(
+            "'recipients' email setting list cannot be empty")
+    for r_idx, recipient in enumerate(recipients):
+        if not isinstance(recipient,
+                          str) or not recipient.strip():
+            raise ConfigError(
+                f"'recipients' email setting at index {r_idx} must be a non-empty string"
+            )
+
+
+def _validate_notifications(notif_data: dict) -> None:
+    if not isinstance(notif_data, dict):
+        raise ConfigError(
+            "'notifications' setting must be a dictionary")
+
+    for k in ["on_success", "on_failure", "desktop"]:
+        if k in notif_data:
+            if not isinstance(notif_data[k], bool):
+                raise ConfigError(
+                    f"'{k}' notification setting must be a boolean")
+
+    for k in ["slack_webhook", "discord_webhook"]:
+        if k in notif_data:
+            val = notif_data[k]
+            if val is not None:
+                if not isinstance(val, str) or not val.strip():
+                    raise ConfigError(
+                        f"'{k}' notification setting must be a non-empty string or null"
+                    )
+                if not (val.startswith("http://")
+                        or val.startswith("https://")):
+                    raise ConfigError(
+                        f"'{k}' notification setting must be a valid http/https URL"
+                    )
+
+    if "email" in notif_data:
+        email_data = notif_data["email"]
+        if email_data is not None:
+            _validate_email_config(email_data)
+
+
+def _validate_settings(settings_data: dict) -> None:
+    if not isinstance(settings_data, dict):
+        raise ConfigError("'settings' section must be a dictionary")
+
+    if "stop_on_failure" in settings_data:
+        if not isinstance(settings_data["stop_on_failure"], bool):
+            raise ConfigError(
+                "'stop_on_failure' setting must be a boolean")
+
+    if "log_dir" in settings_data:
+        log_dir = settings_data["log_dir"]
+        if not isinstance(log_dir, str) or not log_dir.strip():
+            raise ConfigError(
+                "'log_dir' setting must be a non-empty string")
+
+    if "verbose" in settings_data:
+        if not isinstance(settings_data["verbose"], bool):
+            raise ConfigError("'verbose' setting must be a boolean")
+
+    if "notifications" in settings_data:
+        _validate_notifications(settings_data["notifications"])
+
+
 def _expand_env_vars(val):
     if isinstance(val, str):
         def replace(match):
@@ -180,207 +426,11 @@ def validate_config(path: str | Path,
     # Validate each job
     seen_names = set()
     for idx, job_data in enumerate(jobs_data):
-        if not isinstance(job_data, dict):
-            raise ConfigError(f"Job at index {idx} must be a dictionary")
-
-        if "name" not in job_data:
-            raise ConfigError(
-                f"Job at index {idx} is missing the 'name' field")
-        name = job_data["name"]
-        if not isinstance(name, str) or not name.strip():
-            raise ConfigError(
-                f"Job name at index {idx} must be a non-empty string")
-        if name in seen_names:
-            raise ConfigError(f"Duplicate job name: '{name}'")
-        seen_names.add(name)
-
-        # Working Directory (CWD)
-        if "cwd" not in job_data:
-            raise ConfigError(f"Job '{name}' is missing 'cwd' field")
-        cwd = job_data["cwd"]
-        if not isinstance(cwd, str) or not cwd.strip():
-            raise ConfigError(
-                f"Job '{name}' 'cwd' field must be a non-empty string")
-        if not Path(cwd).is_dir():
-            raise ConfigError(
-                f"Job '{name}' 'cwd' directory does not exist: {cwd}")
-
-        # Commands list
-        if "commands" not in job_data:
-            raise ConfigError(f"Job '{name}' is missing 'commands' field")
-        commands = job_data["commands"]
-        if not isinstance(commands, list):
-            raise ConfigError(f"Job '{name}' 'commands' must be a list")
-        if not commands:
-            raise ConfigError(f"Job '{name}' 'commands' list cannot be empty")
-        for c_idx, cmd in enumerate(commands):
-            if not isinstance(cmd, str) or not cmd.strip():
-                raise ConfigError(
-                    f"Job '{name}' command at index {c_idx} must be a non-empty string"
-                )
-
-        # Environment Variables (Optional)
-        if "env" in job_data:
-            env = job_data["env"]
-            if not isinstance(env, dict):
-                raise ConfigError(
-                    f"Job '{name}' 'env' field must be a dictionary")
-            for k, v in env.items():
-                if not isinstance(k, str):
-                    raise ConfigError(
-                        f"Job '{name}' 'env' key '{k}' must be a string")
-                if not isinstance(v, str):
-                    raise ConfigError(
-                        f"Job '{name}' 'env' value for '{k}' must be a string")
-
-        # Retries (Optional)
-        if "retries" in job_data:
-            retries = job_data["retries"]
-            if not isinstance(retries, int) or isinstance(retries,
-                                                          bool) or retries < 0:
-                raise ConfigError(
-                    f"Job '{name}' 'retries' field must be a non-negative integer"
-                )
-
-        # Retry Delay Seconds (Optional)
-        if "retry_delay_seconds" in job_data:
-            delay = job_data["retry_delay_seconds"]
-            if not isinstance(delay, (int, float)) or isinstance(
-                    delay, bool) or not math.isfinite(delay) or delay < 0:
-                raise ConfigError(
-                    f"Job '{name}' 'retry_delay_seconds' field must be a non-negative finite number"
-                )
-
-        # Command Timeout Minutes (Optional)
-        if "command_timeout_minutes" in job_data:
-            timeout = job_data["command_timeout_minutes"]
-            if not isinstance(timeout, (int, float)) or isinstance(
-                    timeout,
-                    bool) or not math.isfinite(timeout) or timeout <= 0:
-                raise ConfigError(
-                    f"Job '{name}' 'command_timeout_minutes' field must be a positive finite number"
-                )
+        _validate_job(job_data, idx, seen_names)
 
     # Validate Settings (Optional)
     if "settings" in data:
-        settings_data = data["settings"]
-        if not isinstance(settings_data, dict):
-            raise ConfigError("'settings' section must be a dictionary")
-
-        if "stop_on_failure" in settings_data:
-            if not isinstance(settings_data["stop_on_failure"], bool):
-                raise ConfigError(
-                    "'stop_on_failure' setting must be a boolean")
-
-        if "log_dir" in settings_data:
-            log_dir = settings_data["log_dir"]
-            if not isinstance(log_dir, str) or not log_dir.strip():
-                raise ConfigError(
-                    "'log_dir' setting must be a non-empty string")
-
-        if "verbose" in settings_data:
-            if not isinstance(settings_data["verbose"], bool):
-                raise ConfigError("'verbose' setting must be a boolean")
-
-        if "notifications" in settings_data:
-            notif_data = settings_data["notifications"]
-            if not isinstance(notif_data, dict):
-                raise ConfigError(
-                    "'notifications' setting must be a dictionary")
-
-            for k in ["on_success", "on_failure", "desktop"]:
-                if k in notif_data:
-                    if not isinstance(notif_data[k], bool):
-                        raise ConfigError(
-                            f"'{k}' notification setting must be a boolean")
-
-            for k in ["slack_webhook", "discord_webhook"]:
-                if k in notif_data:
-                    val = notif_data[k]
-                    if val is not None:
-                        if not isinstance(val, str) or not val.strip():
-                            raise ConfigError(
-                                f"'{k}' notification setting must be a non-empty string or null"
-                            )
-                        if not (val.startswith("http://")
-                                or val.startswith("https://")):
-                            raise ConfigError(
-                                f"'{k}' notification setting must be a valid http/https URL"
-                            )
-
-            if "email" in notif_data:
-                email_data = notif_data["email"]
-                if email_data is not None:
-                    if not isinstance(email_data, dict):
-                        raise ConfigError(
-                            "'email' notification setting must be a dictionary or null"
-                        )
-
-                    # Validate host
-                    if "smtp_host" not in email_data:
-                        raise ConfigError(
-                            "Missing 'smtp_host' in email notification configuration"
-                        )
-                    host = email_data["smtp_host"]
-                    if not isinstance(host, str) or not host.strip():
-                        raise ConfigError(
-                            "'smtp_host' email setting must be a non-empty string"
-                        )
-
-                    # Validate port
-                    if "smtp_port" in email_data:
-                        port = email_data["smtp_port"]
-                        if not isinstance(port, int) or isinstance(
-                                port, bool) or port <= 0:
-                            raise ConfigError(
-                                "'smtp_port' email setting must be a positive integer"
-                            )
-
-                    # Validate username and password
-                    for field_name in ["smtp_username", "smtp_password"]:
-                        if field_name in email_data:
-                            val = email_data[field_name]
-                            if val is not None and (not isinstance(val, str)
-                                                    or not val.strip()):
-                                raise ConfigError(
-                                    f"'{field_name}' email setting must be a string or null"
-                                )
-
-                    # Validate use_tls
-                    if "use_tls" in email_data:
-                        if not isinstance(email_data["use_tls"], bool):
-                            raise ConfigError(
-                                "'use_tls' email setting must be a boolean")
-
-                    # Validate sender
-                    if "sender" not in email_data:
-                        raise ConfigError(
-                            "Missing 'sender' in email notification configuration"
-                        )
-                    sender = email_data["sender"]
-                    if not isinstance(sender, str) or not sender.strip():
-                        raise ConfigError(
-                            "'sender' email setting must be a non-empty string"
-                        )
-
-                    # Validate recipients
-                    if "recipients" not in email_data:
-                        raise ConfigError(
-                            "Missing 'recipients' in email notification configuration"
-                        )
-                    recipients = email_data["recipients"]
-                    if not isinstance(recipients, list):
-                        raise ConfigError(
-                            "'recipients' email setting must be a list")
-                    if not recipients:
-                        raise ConfigError(
-                            "'recipients' email setting list cannot be empty")
-                    for r_idx, recipient in enumerate(recipients):
-                        if not isinstance(recipient,
-                                          str) or not recipient.strip():
-                            raise ConfigError(
-                                f"'recipients' email setting at index {r_idx} must be a non-empty string"
-                            )
+        _validate_settings(data["settings"])
 
 
 def load_config(path: str | Path,

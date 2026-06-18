@@ -17,6 +17,33 @@ import threading
 import time
 
 
+def _terminate_process(process: subprocess.Popen) -> None:
+    """Safely terminates a process group or session in a platform-sensitive manner."""
+    if sys.platform == "win32":
+        try:
+            os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+
+def _format_timeout(timeout: float) -> str:
+    """Formats a timeout float value to string by stripping trailing
+    zeros and decimal points.
+    """
+    return f"{timeout:.6f}".rstrip("0").rstrip(".")
+
+
 @dataclass
 class CommandResult:
     """Detailed result of a single command execution."""
@@ -148,24 +175,7 @@ class JobExecutor:
                         sys.stdout.flush()
 
                 if timed_out:
-                    # Terminate process group/session
-                    if sys.platform == "win32":
-                        try:
-                            os.kill(process.pid, signal.CTRL_BREAK_EVENT)
-                        except Exception:
-                            try:
-                                process.kill()
-                            except Exception:
-                                pass
-                    else:
-                        try:
-                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                        except Exception:
-                            try:
-                                process.kill()
-                            except Exception:
-                                pass
-
+                    _terminate_process(process)
                     process.wait()
 
                     # Drain bounded queue so reader thread is not blocked on queue.put
@@ -177,8 +187,7 @@ class JobExecutor:
                         if line_bytes is None:
                             break
 
-                    formatted_timeout = f"{timeout:.6f}".rstrip("0").rstrip(
-                        ".")
+                    formatted_timeout = _format_timeout(timeout)
                     error_message = f"Command timed out after {formatted_timeout} seconds"
                     if log_file:
                         log_file.write(f"[ERROR] {error_message}\n")
@@ -215,27 +224,9 @@ class JobExecutor:
                         exit_code = process.wait(timeout=timeout)
                         success = (exit_code == 0)
                     except subprocess.TimeoutExpired:
-                        if sys.platform == "win32":
-                            try:
-                                os.kill(process.pid, signal.CTRL_BREAK_EVENT)
-                            except Exception:
-                                try:
-                                    process.kill()
-                                except Exception:
-                                    pass
-                        else:
-                            try:
-                                os.killpg(os.getpgid(process.pid),
-                                          signal.SIGKILL)
-                            except Exception:
-                                try:
-                                    process.kill()
-                                except Exception:
-                                    pass
-
+                        _terminate_process(process)
                         process.wait()
-                        formatted_timeout = f"{timeout:.6f}".rstrip(
-                            "0").rstrip(".")
+                        formatted_timeout = _format_timeout(timeout)
                         error_message = f"Command timed out after {formatted_timeout} seconds"
                         if log_file:
                             log_file.write(f"[ERROR] {error_message}\n")
