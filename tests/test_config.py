@@ -654,3 +654,58 @@ def test_config_env_var_interpolation(tmp_path, monkeypatch):
     config = load_config(config_file)
     assert config.settings.log_dir == "env_logs"
     assert config.settings.notifications.slack_webhook == "https://hooks.slack.com/services/env"
+
+
+def test_config_build_it_validation(tmp_path):
+    """Verify that the job build_it field is validated properly."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    # 1. build_it explicitly set to True
+    config_file1 = tmp_path / "build_it_true.yaml"
+    config_file1.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        build_it: true
+    """, encoding="utf-8")
+    config1 = load_config(config_file1)
+    assert config1.jobs[0].build_it is True
+
+    # 2. build_it explicitly set to False
+    config_file2 = tmp_path / "build_it_false.yaml"
+    config_file2.write_text(f"""
+    jobs:
+      - name: job-2
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 2"]
+        build_it: false
+    """, encoding="utf-8")
+    config2 = load_config(config_file2)
+    assert config2.jobs[0].build_it is False
+
+    # 3. build_it not specified (defaults to True)
+    config_file3 = tmp_path / "build_it_default.yaml"
+    config_file3.write_text(f"""
+    jobs:
+      - name: job-3
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 3"]
+    """, encoding="utf-8")
+    config3 = load_config(config_file3)
+    assert config3.jobs[0].build_it is True
+
+    # 4. build_it with non-boolean should raise ConfigError
+    config_file4 = tmp_path / "build_it_invalid.yaml"
+    config_file4.write_text(f"""
+    jobs:
+      - name: job-4
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 4"]
+        build_it: "yes"
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file4)
+    assert "build_it' field must be a boolean" in str(exc.value)
+

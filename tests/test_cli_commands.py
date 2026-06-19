@@ -333,8 +333,7 @@ def test_cli_run_shutdown_failure(mock_sub_run, tmp_path, capsys):
     from unittest.mock import patch as local_patch
 
     mock_sub_run.side_effect = subprocess.CalledProcessError(
-        returncode=1, cmd=["shutdown"], stderr="Permission denied"
-    )
+        returncode=1, cmd=["shutdown"], stderr="Permission denied")
 
     config_file = tmp_path / "valid.yaml"
     workspace_dir = tmp_path / "workspace"
@@ -372,4 +371,3 @@ def test_cli_run_shutdown_failure(mock_sub_run, tmp_path, capsys):
     assert "Failed to initiate system shutdown (exit code 1): Permission denied" in captured.err
     # Verify that the warning message about scheduled shutdown was NOT printed
     assert "System shutdown scheduled" not in captured.out
-

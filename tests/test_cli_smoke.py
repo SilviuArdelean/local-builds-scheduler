@@ -1,7 +1,6 @@
 # Local Builds Scheduler
 # Copyright 2026 Silviu Ardelean
 # SPDX-License-Identifier: Apache-2.0
-
 """
 Smoke test: verify the CLI entry point is reachable and responds correctly to --help.
 """

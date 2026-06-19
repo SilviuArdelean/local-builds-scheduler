@@ -99,9 +99,7 @@ def test_dispatch_notifications_on_success(mock_urlopen, tmp_path):
         log_dir=str(log_dir),
         notifications=NotificationsConfig(
             on_success=True,
-            slack_webhook="https://hooks.slack.com/services/abc"
-        )
-    )
+            slack_webhook="https://hooks.slack.com/services/abc"))
     jobs = [Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])]
     config = Config(settings=settings, jobs=jobs)
 
@@ -123,9 +121,7 @@ def test_dispatch_notifications_skip_on_success(mock_urlopen, tmp_path):
         log_dir=str(log_dir),
         notifications=NotificationsConfig(
             on_success=False,
-            slack_webhook="https://hooks.slack.com/services/abc"
-        )
-    )
+            slack_webhook="https://hooks.slack.com/services/abc"))
     jobs = [Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])]
     config = Config(settings=settings, jobs=jobs)
 
@@ -152,8 +148,7 @@ def test_send_email_notification_starttls(mock_smtp):
         smtp_password="app-password",
         use_tls=True,
         sender="lbs-scheduler@builds.local",
-        recipients=["user@gmail.com", "other@gmail.com"]
-    )
+        recipients=["user@gmail.com", "other@gmail.com"])
 
     send_email_notification(email_config, "Subject Line", "Email Body message")
 
@@ -183,15 +178,13 @@ def test_send_email_notification_ssl(mock_smtp_ssl):
     mock_server = MagicMock()
     mock_smtp_ssl.return_value = mock_server
 
-    email_config = EmailConfig(
-        smtp_host="smtp.gmail.com",
-        smtp_port=465,
-        smtp_username="user@gmail.com",
-        smtp_password="app-password",
-        use_tls=False,
-        sender="lbs-scheduler@builds.local",
-        recipients=["user@gmail.com"]
-    )
+    email_config = EmailConfig(smtp_host="smtp.gmail.com",
+                               smtp_port=465,
+                               smtp_username="user@gmail.com",
+                               smtp_password="app-password",
+                               use_tls=False,
+                               sender="lbs-scheduler@builds.local",
+                               recipients=["user@gmail.com"])
 
     send_email_notification(email_config, "Subject Line", "Email Body message")
 
@@ -207,8 +200,7 @@ def test_send_email_notification_ssl(mock_smtp_ssl):
 
 @patch("urllib.request.urlopen")
 def test_scheduler_run_with_separate_notifications_config(
-    mock_urlopen, tmp_path
-):
+        mock_urlopen, tmp_path):
     """Verify Scheduler.run utilizes merged settings from a separate notifications file."""
     from lbs.config import load_config
 
@@ -226,13 +218,15 @@ def test_scheduler_run_with_separate_notifications_config(
       - name: job-1
         cwd: "{workspace_dir.as_posix()}"
         commands: ["echo 1"]
-    """, encoding="utf-8")
+    """,
+                           encoding="utf-8")
 
     notif_file = tmp_path / "notifications_private.yaml"
     notif_file.write_text("""
     on_success: true
     slack_webhook: "https://hooks.slack.com/services/from-private-file"
-    """, encoding="utf-8")
+    """,
+                          encoding="utf-8")
 
     # Load config with overrides
     config = load_config(config_file, notifications_path=notif_file)
@@ -257,13 +251,11 @@ def test_no_notifications_flag_disables_triggers():
     mock_settings.notifications.slack_webhook = "https://hooks.slack.com/services/test"
 
     with patch("urllib.request.urlopen") as mock_urlopen:
-        dispatch_notifications(
-            settings=mock_settings,
-            success=True,
-            passed_count=1,
-            failed_count=0,
-            skipped_count=0,
-            duration_str="00:00:05",
-            job_summaries={}
-        )
+        dispatch_notifications(settings=mock_settings,
+                               success=True,
+                               passed_count=1,
+                               failed_count=0,
+                               skipped_count=0,
+                               duration_str="00:00:05",
+                               job_summaries={})
         assert mock_urlopen.call_count == 0
