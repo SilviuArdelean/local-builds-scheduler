@@ -105,14 +105,17 @@ def _print_dry_run_plan(
     for job in config.jobs:
         if job.name not in jobs_to_run:
             continue
+        if not job.build_it:
+            print(f"Job: {job.name} [DISABLED]")
+            print()
+            continue
         if job.name in succeeded_jobs:
             print(f"Job: {job.name} [ALREADY SUCCEEDED]")
             continue
         print(f"Job: {job.name}")
         print(f"  CWD: {job.cwd}")
         env_str = (", ".join(
-            f"{k}={v}"
-            for k, v in job.env.items()) if job.env else "None")
+            f"{k}={v}" for k, v in job.env.items()) if job.env else "None")
         print(f"  Environment: {env_str}")
         if job.retries > 0:
             print(
@@ -145,9 +148,7 @@ def _execute_job_attempt(
             job_log.flush()
 
         if attempt > 1:
-            log_to_job(
-                f"--- Retry Attempt {attempt - 1} / {job.retries} ---"
-            )
+            log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
         else:
             log_to_job(f"Job '{job.name}' started")
             log_to_job(f"CWD: {job.cwd}")
@@ -176,21 +177,16 @@ def _execute_job_attempt(
                     status_label = "FAILED"
                 if result.error_message:
                     log_to_job(
-                        f"Process execution error: {result.error_message}"
-                    )
+                        f"Process execution error: {result.error_message}")
                     log_to_session(
                         f"Job {job.name}: {status_label} "
-                        f"(Command '{cmd}' failed: {result.error_message})"
-                    )
+                        f"(Command '{cmd}' failed: {result.error_message})")
                 else:
                     log_to_job(
-                        f"Command failed with exit code {result.exit_code}"
-                    )
-                    log_to_session(
-                        f"Job {job.name}: {status_label} "
-                        f"(Command '{cmd}' failed with exit code "
-                        f"{result.exit_code})"
-                    )
+                        f"Command failed with exit code {result.exit_code}")
+                    log_to_session(f"Job {job.name}: {status_label} "
+                                   f"(Command '{cmd}' failed with exit code "
+                                   f"{result.exit_code})")
                 job_success = False
                 break
             else:
@@ -233,11 +229,9 @@ def _run_single_job(
             break
         else:
             if attempt < total_attempts:
-                log_to_session(
-                    f"Job {job.name} failed. Retrying in "
-                    f"{job.retry_delay_seconds} seconds "
-                    f"(attempt {attempt}/{job.retries})..."
-                )
+                log_to_session(f"Job {job.name} failed. Retrying in "
+                               f"{job.retry_delay_seconds} seconds "
+                               f"(attempt {attempt}/{job.retries})...")
                 time.sleep(job.retry_delay_seconds)
 
     return job_success, job_duration
@@ -259,24 +253,19 @@ def _build_summary_text(
         status = summary["status"]
         dur = summary["duration"]
         dur_str = f"{dur:.2f}s" if dur is not None else "-"
-        summary_lines.append(
-            f"Job: {name:<20} ->  {status:<10} ({dur_str})")
+        summary_lines.append(f"Job: {name:<20} ->  {status:<10} ({dur_str})")
     summary_lines.append("=" * 50)
 
     session_status = "SUCCESS" if overall_success else "FAILED"
     summary_lines.append(f"Session completed: {session_status}")
     summary_lines.append("")
 
-    passed_count = sum(
-        1 for s in job_summaries.values() if s["status"] == "SUCCESS"
-    )
-    failed_count = sum(
-        1 for s in job_summaries.values() if s["status"] == "FAILED"
-    )
-    skipped_count = sum(
-        1 for s in job_summaries.values()
-        if s["status"] in ("SKIPPED", "PENDING")
-    )
+    passed_count = sum(1 for s in job_summaries.values()
+                       if s["status"] == "SUCCESS")
+    failed_count = sum(1 for s in job_summaries.values()
+                       if s["status"] == "FAILED")
+    skipped_count = sum(1 for s in job_summaries.values()
+                        if s["status"] in ("SKIPPED", "PENDING"))
 
     total_seconds = int(elapsed_time)
     hours = total_seconds // 3600
@@ -351,7 +340,8 @@ class Scheduler:
         saved_summaries = {}
 
         if resume == "latest":
-            session_date, saved_summaries = _parse_and_validate_resume_state(state_path)
+            session_date, saved_summaries = _parse_and_validate_resume_state(
+                state_path)
             succeeded_jobs = {
                 name
                 for name, info in saved_summaries.items()
@@ -362,8 +352,7 @@ class Scheduler:
             selected_succeeded = all(
                 isinstance(saved_summaries.get(name), dict)
                 and saved_summaries[name].get("status") == "SUCCESS"
-                for name in jobs_to_run
-            )
+                for name in jobs_to_run)
             if selected_succeeded:
                 print(
                     "All selected jobs in the previous session completed successfully. Nothing to resume."
@@ -398,9 +387,10 @@ class Scheduler:
                         "duration": job_info.get("duration")
                     }
                 else:
+                    status_val = "PENDING" if (job.name in jobs_to_run
+                                               and job.build_it) else "SKIPPED"
                     job_summaries[job.name] = {
-                        "status":
-                        "PENDING" if job.name in jobs_to_run else "SKIPPED",
+                        "status": status_val,
                         "duration": None
                     }
 
@@ -431,6 +421,16 @@ class Scheduler:
             for job in config.jobs:
                 if job.name not in jobs_to_run:
                     # Not selected by the job filter, leave as initialized
+                    continue
+
+                if not job.build_it:
+                    log_to_session(f"Job {job.name} is disabled. Skipping.")
+                    job_summaries[job.name] = {
+                        "status": "SKIPPED",
+                        "duration": None
+                    }
+                    _save_state(state_path, config_path, session_date,
+                                job_summaries)
                     continue
 
                 if job_summaries[job.name]["status"] == "SUCCESS":

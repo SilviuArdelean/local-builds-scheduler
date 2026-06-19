@@ -21,29 +21,24 @@ def test_dry_run_output_structure(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-A",
-                "cwd": str(workspace_dir),
-                "env": {
-                    "BUILD_TYPE": "debug"
-                },
-                "commands": ["echo A1", "echo A2"]
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "env": {
+                "BUILD_TYPE": "debug"
             },
-            {
-                "name": "job-B",
-                "cwd": str(workspace_dir),
-                "commands": ["echo B1"]
-            }
-        ]
+            "commands": ["echo A1", "echo A2"]
+        }, {
+            "name": "job-B",
+            "cwd": str(workspace_dir),
+            "commands": ["echo B1"]
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
     result = subprocess.run(
-        [
-            sys.executable, "-m", "lbs", "run",
-            str(config_file), "--dry-run"
-        ],
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file), "--dry-run"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -51,7 +46,7 @@ def test_dry_run_output_structure(tmp_path):
     assert result.returncode == 0
     assert "Dry-Run Execution Plan" in result.stdout
     assert f"Log Directory: {log_dir}" in result.stdout
-    
+
     # Assert Job A details
     assert "Job: job-A" in result.stdout
     assert f"  CWD: {workspace_dir}" in result.stdout
@@ -80,18 +75,15 @@ def test_dry_run_with_filtering(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-A",
-                "cwd": str(workspace_dir),
-                "commands": ["echo A1"]
-            },
-            {
-                "name": "job-B",
-                "cwd": str(workspace_dir),
-                "commands": ["echo B1"]
-            }
-        ]
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "commands": ["echo A1"]
+        }, {
+            "name": "job-B",
+            "cwd": str(workspace_dir),
+            "commands": ["echo B1"]
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
@@ -121,13 +113,11 @@ def test_dry_run_invalid_filter(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-A",
-                "cwd": str(workspace_dir),
-                "commands": ["echo A1"]
-            }
-        ]
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "commands": ["echo A1"]
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
@@ -155,23 +145,19 @@ def test_dry_run_with_retries(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-A",
-                "cwd": str(workspace_dir),
-                "commands": ["echo A1"],
-                "retries": 3,
-                "retry_delay_seconds": 12
-            }
-        ]
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "commands": ["echo A1"],
+            "retries": 3,
+            "retry_delay_seconds": 12
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
     result = subprocess.run(
-        [
-            sys.executable, "-m", "lbs", "run",
-            str(config_file), "--dry-run"
-        ],
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file), "--dry-run"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -193,22 +179,18 @@ def test_dry_run_with_timeout(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-A",
-                "cwd": str(workspace_dir),
-                "commands": ["echo A1"],
-                "command_timeout_minutes": 15.5
-            }
-        ]
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "commands": ["echo A1"],
+            "command_timeout_minutes": 15.5
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
     result = subprocess.run(
-        [
-            sys.executable, "-m", "lbs", "run",
-            str(config_file), "--dry-run"
-        ],
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file), "--dry-run"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -217,3 +199,50 @@ def test_dry_run_with_timeout(tmp_path):
     assert "Dry-Run Execution Plan" in result.stdout
     assert "Job: job-A" in result.stdout
     assert "  Timeout: 15.5m" in result.stdout
+
+
+def test_dry_run_with_disabled_job(tmp_path):
+    """Verify that --dry-run prints [DISABLED] suffix for disabled jobs and excludes their details."""
+    config_file = tmp_path / "config.yaml"
+    log_dir = tmp_path / "logs"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [{
+            "name": "job-A",
+            "cwd": str(workspace_dir),
+            "commands": ["echo A1"],
+            "build_it": True
+        }, {
+            "name": "job-B",
+            "cwd": str(workspace_dir),
+            "commands": ["echo B1"],
+            "build_it": False
+        }]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file), "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "Dry-Run Execution Plan" in result.stdout
+    assert "Job: job-A" in result.stdout
+    assert f"  CWD: {workspace_dir}" in result.stdout
+    assert "    - echo A1" in result.stdout
+
+    # Split the output by "Job: " to isolate each job block
+    job_blocks = result.stdout.split("Job: ")
+    job_b_block = [b for b in job_blocks if b.startswith("job-B")][0]
+    assert "[DISABLED]" in job_b_block
+    assert "CWD: " not in job_b_block
+    assert "Environment: " not in job_b_block
+    assert "Commands:" not in job_b_block

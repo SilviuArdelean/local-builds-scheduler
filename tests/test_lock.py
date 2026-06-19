@@ -22,13 +22,14 @@ def test_lock_prevents_double_runs(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-1",
-                "cwd": str(tmp_path),
-                "commands": [f'"{sys.executable}" -c "import time; time.sleep(1)"']
-            }
-        ]
+        "jobs": [{
+            "name":
+            "job-1",
+            "cwd":
+            str(tmp_path),
+            "commands":
+            [f'"{sys.executable}" -c "import time; time.sleep(1)"']
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
@@ -36,7 +37,8 @@ def test_lock_prevents_double_runs(tmp_path):
     with FileLock(lock_path):
         # Spawning second concurrent instance
         result = subprocess.run(
-            [sys.executable, "-m", "lbs", "run", str(config_file)],
+            [sys.executable, "-m", "lbs", "run",
+             str(config_file)],
             capture_output=True,
             text=True,
             timeout=5,
@@ -55,19 +57,18 @@ def test_lock_released_allows_subsequent_runs(tmp_path):
         "settings": {
             "log_dir": str(log_dir)
         },
-        "jobs": [
-            {
-                "name": "job-1",
-                "cwd": str(tmp_path),
-                "commands": ["echo 1"]
-            }
-        ]
+        "jobs": [{
+            "name": "job-1",
+            "cwd": str(tmp_path),
+            "commands": ["echo 1"]
+        }]
     }
     config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
     # First execution run
     result1 = subprocess.run(
-        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file)],
         capture_output=True,
         text=True,
         timeout=5,
@@ -76,7 +77,8 @@ def test_lock_released_allows_subsequent_runs(tmp_path):
 
     # Second execution run (sequential) should work fine
     result2 = subprocess.run(
-        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        [sys.executable, "-m", "lbs", "run",
+         str(config_file)],
         capture_output=True,
         text=True,
         timeout=5,
