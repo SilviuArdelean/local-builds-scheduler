@@ -276,7 +276,7 @@ Avoid turning it into a complex CI system too early.
 
 ## Status
 
-**Version 0.6.0** is fully implemented and ready for local development workflows. It provides robust sequential execution, session and job-level logging, flexible failure handling, configuration validation, and job filtering.
+**Version 1.0.0** is fully implemented and ready for local development workflows. It provides robust sequential execution, session and job-level logging, flexible failure handling, configuration validation, and job filtering.
 
 ---
 
