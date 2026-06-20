@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 
@@ -154,16 +155,39 @@ def _execute_job_attempt(
             log_to_job(f"CWD: {job.cwd}")
             log_to_job(f"Environment overlays: {job.env}")
 
-        executor = JobExecutor(verbose=verbose)
+        # Write commands to a temp script to preserve state sequentially
+        suffix = ".bat" if sys.platform == "win32" else ".sh"
+        fd, temp_script_path_str = tempfile.mkstemp(suffix=suffix,
+                                                    prefix="lbs_job_")
+        temp_script_path = Path(temp_script_path_str)
 
-        for cmd in job.commands:
-            log_to_job(f"Executing command: {cmd}")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                if sys.platform == "win32":
+                    f.write("@echo off\n")
+                    for cmd in job.commands:
+                        f.write(f"{cmd}\n")
+                        f.write("if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
+                else:
+                    f.write("#!/bin/sh\n")
+                    f.write("set -e\n")
+                    for cmd in job.commands:
+                        f.write(f"{cmd}\n")
+
+            executor = JobExecutor(verbose=verbose)
+
+            if sys.platform == "win32":
+                run_cmd = f'"{temp_script_path.resolve()}"'
+            else:
+                run_cmd = f'sh "{temp_script_path.resolve()}"'
+
             if job.command_timeout_minutes is not None:
                 timeout_sec = job.command_timeout_minutes * 60
             else:
                 timeout_sec = None
+
             result = executor.run_command(
-                cmd,
+                run_cmd,
                 cwd=job.cwd,
                 env=job.env,
                 log_file=job_log,
@@ -178,19 +202,22 @@ def _execute_job_attempt(
                 if result.error_message:
                     log_to_job(
                         f"Process execution error: {result.error_message}")
-                    log_to_session(
-                        f"Job {job.name}: {status_label} "
-                        f"(Command '{cmd}' failed: {result.error_message})")
+                    log_to_session(f"Job {job.name}: {status_label} "
+                                   f"(Command failed: {result.error_message})")
                 else:
                     log_to_job(
                         f"Command failed with exit code {result.exit_code}")
                     log_to_session(f"Job {job.name}: {status_label} "
-                                   f"(Command '{cmd}' failed with exit code "
+                                   f"(Command failed with exit code "
                                    f"{result.exit_code})")
                 job_success = False
-                break
             else:
                 log_to_job("Command succeeded")
+        finally:
+            try:
+                temp_script_path.unlink()
+            except OSError:
+                pass
 
     return job_success
 

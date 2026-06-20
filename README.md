@@ -63,7 +63,7 @@ jobs:
       PATH: "d:\\tools;%PATH%"
     retries: 2                  # Retry the job up to 2 times if any command fails
     retry_delay_seconds: 10     # Wait 10 seconds before retrying
-    command_timeout_minutes: 15 # Terminate command if it takes longer than 15 minutes
+    command_timeout_minutes: 15 # Terminate job if commands take longer than 15 minutes
     commands:
       - git reset --hard
       - git clean -xffd
@@ -114,7 +114,7 @@ The `jobs` key contains a list of jobs executed sequentially in the specified or
 | `env` | `dict[str, str]` | `{}` | Environment variable overlays added/overridden specifically for this job's commands. |
 | `retries` | `integer` | `0` | Number of times to retry the job's entire sequence if any command fails. |
 | `retry_delay_seconds` | `number` | `0` | Delay (in seconds) to wait before retrying the job. |
-| `command_timeout_minutes`| `number` | `null` | Max execution duration (in minutes) allowed for *each individual command* in this job. Commands exceeding this are terminated. |
+| `command_timeout_minutes`| `number` | `null` | Max execution duration (in minutes) allowed for the entire job command sequence. Commands exceeding this are terminated. |
 
 ---
 
