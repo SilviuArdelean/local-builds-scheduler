@@ -322,3 +322,69 @@ def test_runner_skips_disabled_jobs(tmp_path):
     assert "Failed: 0" in session_log_content
     assert "Skipped: 1" in session_log_content
     assert "Session completed: SUCCESS" in session_log_content
+
+
+def test_runner_directory_persistence(tmp_path):
+    """Verify that working directory changes persist across sequential commands."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    if sys.platform == "win32":
+        commands = [
+            "mkdir test_dir",
+            "cd test_dir",
+            "echo persistence > test.txt",
+            "type test.txt",
+            "cd ..",
+            "rmdir /s /q test_dir",
+        ]
+    else:
+        commands = [
+            "mkdir test_dir",
+            "cd test_dir",
+            "echo persistence > test.txt",
+            "cat test.txt",
+            "cd ..",
+            "rm -rf test_dir",
+        ]
+
+    jobs = [Job(name="job-dir-test", cwd=str(tmp_path), commands=commands)]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = run_scheduler(config)
+    assert success is True
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    job_log = log_dir / f"{date_str}_job-dir-test.log"
+    job_log_content = job_log.read_text(encoding="utf-8")
+
+    assert "persistence" in job_log_content
+
+
+def test_runner_environment_persistence(tmp_path):
+    """Verify that environment variable assignments persist across sequential commands."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    if sys.platform == "win32":
+        commands = [
+            "set LBS_TEST_PERSIST=success_env",
+            "echo LBS_ENV_VAL:%LBS_TEST_PERSIST%",
+        ]
+    else:
+        commands = [
+            "export LBS_TEST_PERSIST=success_env",
+            "echo LBS_ENV_VAL:$LBS_TEST_PERSIST",
+        ]
+
+    jobs = [Job(name="job-env-test", cwd=str(tmp_path), commands=commands)]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = run_scheduler(config)
+    assert success is True
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    job_log = log_dir / f"{date_str}_job-env-test.log"
+    job_log_content = job_log.read_text(encoding="utf-8")
+
+    assert "LBS_ENV_VAL:success_env" in job_log_content

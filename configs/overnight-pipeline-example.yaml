@@ -1,0 +1,80 @@
+# Local Builds Scheduler (LBS) - Overnight Pipeline Example
+# Copyright 2026 Silviu Ardelean
+# SPDX-License-Identifier: Apache-2.0
+#
+# This file serves as a comprehensive, self-documenting template for LBS.
+# It demonstrates:
+# - Sequential command execution inside a single shell session per job
+# - Directory switching (cd) and environment persistence across steps
+# - Custom retries, delay intervals, timeouts, and environment overlays
+#
+# Execution Command:
+#   lbs run configs/overnight-pipeline-example.yaml --notifications --shutdown
+
+settings:
+  # Directory where session-level and job-specific logs will be stored.
+  # Can be an absolute path or relative to the directory containing this config file.
+  log_dir: "./logs"
+
+  # If true, the execution halts immediately when any job fails.
+  # Subsequent jobs in the queue will be marked as SKIPPED.
+  stop_on_failure: true
+
+  # If true, streams all stdout/stderr directly to the console in real-time
+  # in addition to writing them to the job-specific log files.
+  verbose: true
+
+jobs:
+  # Job 1: Environment check & workspace preparation.
+  # Demonstrates directory creation, entry, file write, and cleanup in sequence.
+  - name: prep-workspace
+    cwd: "."
+    env:
+      BUILD_STAGE: "initialization"
+      OUTPUT_FILENAME: "build_version.txt"
+    commands:
+      - "echo '=== Preparing Workspace for Stage: %BUILD_STAGE% ==='"
+      - "mkdir lbs_temp_workspace"
+      - "cd lbs_temp_workspace"
+      - "echo 'LBS-v1.0.0-Beta' > %OUTPUT_FILENAME%"
+      - "echo 'Generated version marker:'"
+      - "type %OUTPUT_FILENAME%"
+      - "cd .."
+      - "rmdir /s /q lbs_temp_workspace"
+
+  # Job 2: Main compilation queue for Application Alpha (Debug and Release targets)
+  # Demonstrates retries, custom delay intervals, and environment variable persistence.
+  - name: compile-alpha
+    cwd: "."
+    retries: 1
+    retry_delay_seconds: 30
+    command_timeout_minutes: 45
+    commands:
+      - "echo '=== Compiling Application Alpha ==='"
+      - "set ALPHA_BUILD_ENV=Overnight"
+      - "echo 'Starting Debug build compilation...'"
+      - "echo 'Running compiler for target debug...'"
+      - "echo 'Starting Release build compilation...'"
+      - "echo 'Running compiler for target release...'"
+      - "echo 'Application Alpha compilation finished successfully.'"
+
+  # Job 3: Compiler Cache Maintenance
+  # Runs after building to prevent the local cache directory from growing too large.
+  - name: ccache-cleanup
+    cwd: "."
+    commands:
+      - "echo '=== Evicting Outdated Cache Entries ==='"
+      - "echo 'Checking compiler cache statistics...'"
+      - "echo 'Cleaning compiler cache entries older than 7 days...'"
+      - "echo 'Cache maintenance complete.'"
+
+  # Job 4: Automated Verification / Tests
+  # Executes only if Job 2 and 3 finish successfully. Demonstrates isolated environments.
+  - name: run-tests
+    cwd: "."
+    env:
+      TEST_SUITE_LEVEL: "smoke"
+    commands:
+      - "echo '=== Running %TEST_SUITE_LEVEL% Tests ==='"
+      - "echo 'Initializing verification suites...'"
+      - "echo 'All tests passed successfully.'"
