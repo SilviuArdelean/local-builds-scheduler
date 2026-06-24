@@ -29,6 +29,9 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 
 ## Installation
 
+> [!TIP]
+> If you are setting up LBS on a new machine for the first time, check out our step-by-step [Kickstart Guide](docs/kickstart.md) for detailed environment and config guidance.
+
 Requires Python 3.11 or higher. It is recommended to run LBS within a Python virtual environment.
 
 ### 1. Create a Virtual Environment
