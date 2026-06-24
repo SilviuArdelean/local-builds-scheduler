@@ -29,13 +29,31 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 
 ## Installation
 
-Assuming you have cloned the repository, install it locally:
+Requires Python 3.11 or higher. It is recommended to run LBS within a Python virtual environment.
 
+### 1. Create a Virtual Environment
+```bash
+python -m venv .venv
+```
+
+### 2. Activate the Virtual Environment
+* **Windows (PowerShell)**:
+  ```powershell
+  .venv\Scripts\activate
+  ```
+* **Windows (Command Prompt)**:
+  ```cmd
+  .venv\Scripts\activate.bat
+  ```
+* **POSIX (Linux/macOS)**:
+  ```bash
+  source .venv/bin/activate
+  ```
+
+### 3. Install LBS in Editable Mode
 ```bash
 pip install -e .
 ```
-
-*Note: Requires Python 3.11 or higher.*
 
 ---
 

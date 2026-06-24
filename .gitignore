@@ -219,4 +219,5 @@ __marimo__/
 
 # Local Builds Scheduler private configurations
 configs-internal/
+config-internal/
 
