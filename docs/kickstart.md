@@ -21,7 +21,9 @@ Before installing, ensure the machine has the following tools installed:
 ### Step 1: Clone the Repository
 Clone the repository to a folder on your local machine and enter the workspace directory:
 ```bash
-git clone <repository-url>
+git clone https://github.com/SilviuArdelean/local-builds-scheduler/
+or
+git clone git@github.com:SilviuArdelean/local-builds-scheduler.git
 cd local-builds-scheduler
 ```
 
