@@ -157,8 +157,8 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the failed or skipped jobs from the previous session. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
-| **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs and schedules an OS shutdown after completion (ideal for overnight builds). |
-| **Overnight Resumed Run** | `lbs run config.yaml --resume latest --notifications --shutdown` | Resumes a previous run, dispatches alerts on outcome, and shuts down the machine upon completion. |
+| **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs, then schedules an OS shutdown **only if every job succeeded**. A failed session leaves the machine powered on for diagnosis. |
+| **Overnight Resumed Run** | `lbs run config.yaml --resume latest --notifications` | Resumes a previous run and dispatches alerts on outcome. Append `--shutdown` to power the machine off on success. |
 | **List Jobs** | `lbs list config.yaml` | Prints the names of all jobs in the order they will be executed, one per line. |
 | **Validate Configuration** | `lbs validate config.yaml` | Validates YAML syntax and config schema. Exit code `0` if valid, `2` if invalid. |
 | **Validate Merged Configuration** | `lbs validate config.yaml -n private.yaml` | Validates syntax and merged schema of both the main configuration and private notification config together. |
@@ -184,7 +184,7 @@ lbs run <config-path> [options]
 * `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the failed or skipped jobs.
 * `-n <path>`, `--notifications-config <path>` — Path to a separate YAML file containing private notification settings (e.g., SMTP credentials, Slack/Discord webhooks) to merge with the main config.
 * `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
-* `--shutdown` — Automatically schedules an OS shutdown after completion of all jobs in the session (60-second delay; can be aborted via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS).
+* `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all jobs in the session complete (60-second delay; abort via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). The shutdown is only scheduled when the session **succeeds**: if any job fails the machine is deliberately left running so the failure can be diagnosed, and a message explaining the skip is written to stderr. It is also skipped under `--dry-run`, which executes no jobs.
 
 #### `validate`
 Check if the provided configuration file exists, is valid YAML, and conforms to the schema.
