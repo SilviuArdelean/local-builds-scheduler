@@ -67,7 +67,16 @@ def cmd_run(args: argparse.Namespace) -> None:
             config_path=args.config,
         )
         if getattr(args, "shutdown", False):
-            trigger_os_shutdown()
+            if getattr(args, "dry_run", False):
+                print("Dry run: skipping the requested system shutdown.")
+            elif not success:
+                print(
+                    "Session failed: skipping the requested system shutdown so "
+                    "the machine stays available for diagnosis.",
+                    file=sys.stderr,
+                )
+            else:
+                trigger_os_shutdown()
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -140,7 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--shutdown",
         action="store_true",
-        help="Automatically shut down the system after completion of all jobs.",
+        help="Shut down the system after all jobs complete successfully. "
+        "Skipped if any job fails, and on --dry-run.",
     )
     run_parser.add_argument(
         "-v",

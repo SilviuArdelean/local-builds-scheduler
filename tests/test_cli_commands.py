@@ -371,3 +371,91 @@ def test_cli_run_shutdown_failure(mock_sub_run, tmp_path, capsys):
     assert "Failed to initiate system shutdown (exit code 1): Permission denied" in captured.err
     # Verify that the warning message about scheduled shutdown was NOT printed
     assert "System shutdown scheduled" not in captured.out
+
+
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_skipped_when_job_fails(mock_sub_run, tmp_path,
+                                                 capsys):
+    """--shutdown must not power off the machine when a job fails, so the
+    failure stays diagnosable."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "failing.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["exit 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        verbose=False,
+        job=None,
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_count == 1
+        assert mock_exit.call_args[0][0] == 1
+
+    assert mock_sub_run.call_count == 0
+    captured = capsys.readouterr()
+    assert "skipping the requested system shutdown" in captured.err
+
+
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_skipped_on_dry_run(mock_sub_run, tmp_path, capsys):
+    """--dry-run runs no jobs, so --shutdown must not power off the machine."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        verbose=False,
+        job=None,
+        dry_run=True,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_count == 1
+        assert mock_exit.call_args[0][0] == 0
+
+    assert mock_sub_run.call_count == 0
+    captured = capsys.readouterr()
+    assert "Dry run: skipping the requested system shutdown." in captured.out
