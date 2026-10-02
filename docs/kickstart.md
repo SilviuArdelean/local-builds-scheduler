@@ -65,6 +65,19 @@ lbs --version
 ```
 *(If the command is not found, verify that your terminal shell successfully activated the `.venv` in the previous step, or run the package directly: `python -m lbs.cli --version`)*
 
+> **Windows PowerShell gotcha**: `.venv\Scripts\activate` runs `Activate.ps1`, which PowerShell's
+> default script execution policy (`Restricted`) silently blocks. You'll see an error like:
+> ```
+> ... cannot be loaded because running scripts is disabled on this system.
+> ```
+> `lbs` is installed correctly at this point, it's simply never added to `PATH` because activation
+> failed. Fix it once per machine with (no admin rights required):
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+> ```
+> or bypass it for a single session with `powershell -ExecutionPolicy Bypass -File .venv\Scripts\Activate.ps1`.
+> You can also skip activation entirely and call the venv's exe directly: `.venv\Scripts\lbs.exe --version`.
+
 ---
 
 ## 3. Configuring Your First Build YAML File
@@ -147,10 +160,28 @@ Kick off the sequential execution:
 lbs run my-build-config.yaml --verbose
 ```
 
+List job names first if you just want a quick sanity check of what's defined and in what order:
+```bash
+lbs list my-build-config.yaml
+```
+
+To re-run (or debug) only one job without touching the rest of the queue, filter with `-j`:
+```bash
+lbs run my-build-config.yaml -j compile-project --verbose
+```
+
 ### 4. Monitor & Recover
 * **Logs**: Check `./logs/` for `<date>_session.log` and `<date>_<job-name>.log`.
 * **State**: LBS writes execution progress to `logs/lbs_state.json`.
-* **Resuming**: If a job fails, resolve the issue in your target build, and resume from the failure point by appending `--resume latest`:
+* **Resuming**: If a job fails, resolve the issue in your target build, then resume with `--resume latest`:
   ```bash
   lbs run my-build-config.yaml --resume latest --verbose
   ```
+  **Resume is per-job, not per-command.** LBS skips any job whose *previous* status was `SUCCESS`,
+  but a job that `FAILED`, was `PENDING`, or `SKIPPED` is re-run **from its very first command**,
+  every time — there is no mid-job checkpoint. If a failing job's command list starts with
+  destructive/expensive setup steps (e.g. `git reset --hard`, `git clean -xffd`, a full dependency
+  sync), every resume attempt redoes that setup from scratch before it even gets back to the point
+  that failed. If you want resumes to be cheap, split such a job into two: one job for the
+  destructive/expensive setup, another for the actual build — a resume then only re-runs the
+  build job once setup has succeeded once.
