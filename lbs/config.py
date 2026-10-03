@@ -57,12 +57,19 @@ class Job:
     """A single build job specification."""
     name: str
     cwd: str
-    commands: list[str]
+    commands: list[str] = field(default_factory=list)
+    phases: dict[str, list[str]] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
     retries: int = 0
     retry_delay_seconds: int | float = 0
     command_timeout_minutes: int | float | None = None
     build_it: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.phases and self.commands:
+            self.phases = {"default": list(self.commands)}
+        elif not self.commands and self.phases:
+            self.commands = [cmd for p_cmds in self.phases.values() for cmd in p_cmds]
 
 
 @dataclass
@@ -91,7 +98,7 @@ def _validate_job_metadata(
 
 
 def _validate_job_cwd_and_commands(job_data: dict, name: str) -> None:
-    """Validates the cwd and commands list for a job."""
+    """Validates the cwd and commands list or phases dictionary for a job."""
     # Working Directory (CWD)
     if "cwd" not in job_data:
         raise ConfigError(f"Job '{name}' is missing 'cwd' field")
@@ -103,19 +110,52 @@ def _validate_job_cwd_and_commands(job_data: dict, name: str) -> None:
         raise ConfigError(
             f"Job '{name}' 'cwd' directory does not exist: {cwd}")
 
-    # Commands list
-    if "commands" not in job_data:
-        raise ConfigError(f"Job '{name}' is missing 'commands' field")
-    commands = job_data["commands"]
-    if not isinstance(commands, list):
-        raise ConfigError(f"Job '{name}' 'commands' must be a list")
-    if not commands:
-        raise ConfigError(f"Job '{name}' 'commands' list cannot be empty")
-    for c_idx, cmd in enumerate(commands):
-        if not isinstance(cmd, str) or not cmd.strip():
-            raise ConfigError(
-                f"Job '{name}' command at index {c_idx} must be a non-empty string"
-            )
+    # Commands list or Phases dictionary
+    has_commands = "commands" in job_data
+    has_phases = "phases" in job_data
+
+    if has_commands and has_phases:
+        raise ConfigError(
+            f"Job '{name}' cannot specify both 'commands' and 'phases'")
+    if not has_commands and not has_phases:
+        raise ConfigError(
+            f"Job '{name}' must specify either 'commands' or 'phases'")
+
+    if has_commands:
+        commands = job_data["commands"]
+        if not isinstance(commands, list):
+            raise ConfigError(f"Job '{name}' 'commands' must be a list")
+        if not commands:
+            raise ConfigError(f"Job '{name}' 'commands' list cannot be empty")
+        for c_idx, cmd in enumerate(commands):
+            if not isinstance(cmd, str) or not cmd.strip():
+                raise ConfigError(
+                    f"Job '{name}' command at index {c_idx} must be a non-empty string"
+                )
+    else:
+        phases = job_data["phases"]
+        if not isinstance(phases, dict):
+            raise ConfigError(f"Job '{name}' 'phases' must be a dictionary")
+        if not phases:
+            raise ConfigError(f"Job '{name}' 'phases' dictionary cannot be empty")
+        for phase_name, p_commands in phases.items():
+            if not isinstance(phase_name, str) or not phase_name.strip():
+                raise ConfigError(
+                    f"Job '{name}' phase name '{phase_name}' must be a non-empty string"
+                )
+            if not isinstance(p_commands, list):
+                raise ConfigError(
+                    f"Job '{name}' phase '{phase_name}' commands must be a list"
+                )
+            if not p_commands:
+                raise ConfigError(
+                    f"Job '{name}' phase '{phase_name}' commands list cannot be empty"
+                )
+            for c_idx, cmd in enumerate(p_commands):
+                if not isinstance(cmd, str) or not cmd.strip():
+                    raise ConfigError(
+                        f"Job '{name}' phase '{phase_name}' command at index {c_idx} must be a non-empty string"
+                    )
 
 
 def _validate_job_options(job_data: dict, name: str) -> None:
@@ -456,10 +496,18 @@ def load_config(path: str | Path,
     # Construct Job dataclasses
     jobs = []
     for job_data in data["jobs"]:
+        if "phases" in job_data:
+            phases = {k: list(v) for k, v in job_data["phases"].items()}
+            commands = [cmd for p_cmds in phases.values() for cmd in p_cmds]
+        else:
+            commands = list(job_data["commands"])
+            phases = {"default": list(commands)}
+
         jobs.append(
             Job(name=job_data["name"],
                 cwd=job_data["cwd"],
-                commands=list(job_data["commands"]),
+                commands=commands,
+                phases=phases,
                 env=dict(job_data.get("env", {})),
                 retries=job_data.get("retries", 0),
                 retry_delay_seconds=job_data.get("retry_delay_seconds", 0),

@@ -459,3 +459,52 @@ def test_cli_run_shutdown_skipped_on_dry_run(mock_sub_run, tmp_path, capsys):
     assert mock_sub_run.call_count == 0
     captured = capsys.readouterr()
     assert "Dry run: skipping the requested system shutdown." in captured.out
+
+
+def test_cli_run_mode_sequential(tmp_path):
+    """Running 'lbs run' with --mode sequential should execute jobs in sequential mode."""
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir)
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "phases": {
+                    "sync": [f"{py_cmd} j1-sync"],
+                    "build": [f"{py_cmd} j1-build"],
+                }
+            },
+            {
+                "name": "job-2",
+                "cwd": str(workspace_dir),
+                "phases": {
+                    "sync": [f"{py_cmd} j2-sync"],
+                    "build": [f"{py_cmd} j2-build"],
+                }
+            }
+        ]
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "lbs", "run",
+            str(config_file), "--mode", "sequential"
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "job-1                ->  SUCCESS" in result.stdout
+    assert "job-2                ->  SUCCESS" in result.stdout
+

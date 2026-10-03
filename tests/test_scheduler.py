@@ -197,3 +197,173 @@ def test_cli_run_value_error_without_job(tmp_path):
         with pytest.raises(ValueError) as exc:
             cmd_run(args)
         assert "Programming error" in str(exc.value)
+
+
+def test_scheduler_phased_execution(tmp_path):
+    """Verify that multi-phase jobs run in phase-by-phase order across active jobs in phased mode."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    jobs = [
+        Job(
+            name="job-alpha",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} alpha-sync"],
+                "build": [f"{py_cmd} alpha-build"],
+            }
+        ),
+        Job(
+            name="job-beta",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} beta-sync"],
+                "build": [f"{py_cmd} beta-build"],
+            }
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, mode="phased")
+    assert success is True
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    session_log = log_dir / f"{date_str}_session.log"
+    content = session_log.read_text(encoding="utf-8")
+
+    # Verify cross-job phase order: alpha-sync, beta-sync, alpha-build, beta-build
+    idx_alpha_sync = content.index("Starting job: job-alpha (phase: sync)")
+    idx_beta_sync = content.index("Starting job: job-beta (phase: sync)")
+    idx_alpha_build = content.index("Starting job: job-alpha (phase: build)")
+    idx_beta_build = content.index("Starting job: job-beta (phase: build)")
+
+    assert idx_alpha_sync < idx_beta_sync < idx_alpha_build < idx_beta_build
+
+
+def test_scheduler_phase_filtering(tmp_path):
+    """Verify targeted phase execution using phase_filter."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    jobs = [
+        Job(
+            name="job-alpha",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} alpha-sync"],
+                "build": [f"{py_cmd} alpha-build"],
+            }
+        ),
+        Job(
+            name="job-beta",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} beta-sync"],
+                "build": [f"{py_cmd} beta-build"],
+            }
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    # Run only sync phase
+    success = Scheduler.run(config, phase_filter=["sync"])
+    assert success is True
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    session_log = log_dir / f"{date_str}_session.log"
+    content = session_log.read_text(encoding="utf-8")
+
+    assert "Starting job: job-alpha (phase: sync)" in content
+    assert "Starting job: job-beta (phase: sync)" in content
+    assert "Starting job: job-alpha (phase: build)" not in content
+    assert "Starting job: job-beta (phase: build)" not in content
+
+
+def test_scheduler_sequential_execution(tmp_path):
+    """Verify that multi-phase jobs run all phases of job-alpha before starting job-beta in sequential mode."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    jobs = [
+        Job(
+            name="job-alpha",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} alpha-sync"],
+                "build": [f"{py_cmd} alpha-build"],
+            }
+        ),
+        Job(
+            name="job-beta",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} beta-sync"],
+                "build": [f"{py_cmd} beta-build"],
+            }
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, mode="sequential")
+    assert success is True
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    session_log = log_dir / f"{date_str}_session.log"
+    content = session_log.read_text(encoding="utf-8")
+
+    # Verify per-job sequential phase order: alpha-sync, alpha-build, beta-sync, beta-build
+    idx_alpha_sync = content.index("Starting job: job-alpha (phase: sync)")
+    idx_alpha_build = content.index("Starting job: job-alpha (phase: build)")
+    idx_beta_sync = content.index("Starting job: job-beta (phase: sync)")
+    idx_beta_build = content.index("Starting job: job-beta (phase: build)")
+
+    assert idx_alpha_sync < idx_alpha_build < idx_beta_sync < idx_beta_build
+
+
+def test_scheduler_sequential_mode_failure_stop_on_failure(tmp_path):
+    """Verify that a failure in sequential mode aborts remaining phases and subsequent jobs when stop_on_failure is enabled."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    jobs = [
+        Job(
+            name="job-alpha",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_fail],
+                "build": [f"{py_cmd} alpha-build"],
+            }
+        ),
+        Job(
+            name="job-beta",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} beta-sync"],
+                "build": [f"{py_cmd} beta-build"],
+            }
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, mode="sequential")
+    assert success is False
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    session_log = log_dir / f"{date_str}_session.log"
+    content = session_log.read_text(encoding="utf-8")
+
+    assert "job-alpha            ->  FAILED" in content
+    assert "job-beta             ->  SKIPPED" in content
+    assert "Starting job: job-alpha (phase: build)" not in content
+    assert "Starting job: job-beta (phase: sync)" not in content
+
+

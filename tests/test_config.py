@@ -709,3 +709,67 @@ def test_config_build_it_validation(tmp_path):
         load_config(config_file4)
     assert "build_it' field must be a boolean" in str(exc.value)
 
+
+def test_config_phases_validation(tmp_path):
+    """Verify parsing and validation of multi-phase job definitions."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    # 1. Valid phases configuration
+    config_file1 = tmp_path / "phased_config.yaml"
+    config_file1.write_text(f"""
+    jobs:
+      - name: job-phased
+        cwd: "{workspace_dir.as_posix()}"
+        phases:
+          sync:
+            - "echo syncing"
+          build:
+            - "echo building"
+    """, encoding="utf-8")
+    config1 = load_config(config_file1)
+    job1 = config1.jobs[0]
+    assert "sync" in job1.phases
+    assert "build" in job1.phases
+    assert job1.phases["sync"] == ["echo syncing"]
+    assert job1.phases["build"] == ["echo building"]
+    assert job1.commands == ["echo syncing", "echo building"]
+
+    # 2. Specifying both commands and phases should fail
+    config_file2 = tmp_path / "both_commands_phases.yaml"
+    config_file2.write_text(f"""
+    jobs:
+      - name: job-both
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+        phases:
+          sync: ["echo 1"]
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file2)
+    assert "cannot specify both 'commands' and 'phases'" in str(exc.value)
+
+    # 3. Specifying neither commands nor phases should fail
+    config_file3 = tmp_path / "neither_commands_phases.yaml"
+    config_file3.write_text(f"""
+    jobs:
+      - name: job-neither
+        cwd: "{workspace_dir.as_posix()}"
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file3)
+    assert "must specify either 'commands' or 'phases'" in str(exc.value)
+
+    # 4. Empty phases dictionary should fail
+    config_file4 = tmp_path / "empty_phases.yaml"
+    config_file4.write_text(f"""
+    jobs:
+      - name: job-empty-phases
+        cwd: "{workspace_dir.as_posix()}"
+        phases: {{}}
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file4)
+    assert "phases' dictionary cannot be empty" in str(exc.value)
+
+
