@@ -124,9 +124,16 @@ def _print_dry_run_plan(
             )
         if job.command_timeout_minutes is not None:
             print(f"  Timeout: {job.command_timeout_minutes}m")
-        print("  Commands:")
-        for cmd in job.commands:
-            print(f"    - {cmd}")
+        if len(job.phases) == 1 and "default" in job.phases:
+            print("  Commands:")
+            for cmd in job.phases["default"]:
+                print(f"    - {cmd}")
+        else:
+            print("  Phases:")
+            for phase_name, cmds in job.phases.items():
+                print(f"    [{phase_name}]")
+                for cmd in cmds:
+                    print(f"      - {cmd}")
         print()
 
 
@@ -137,8 +144,13 @@ def _execute_job_attempt(
     total_attempts: int,
     job_log_path: Path,
     log_to_session,
+    commands: list[str] | None = None,
+    phase_name: str | None = None,
 ) -> bool:
-    """Executes all commands of a job in a single attempt, logging outputs."""
+    """Executes all commands of a job phase in a single attempt, logging outputs."""
+    if commands is None:
+        commands = job.commands
+
     job_success = True
     with open(job_log_path, "a", encoding="utf-8") as job_log:
 
@@ -148,12 +160,17 @@ def _execute_job_attempt(
             job_log.write(f"[{timestamp}] {msg}\n")
             job_log.flush()
 
+        phase_suffix = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
         if attempt > 1:
             log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
         else:
-            log_to_job(f"Job '{job.name}' started")
+            log_to_job(f"Job '{job.name}'{phase_suffix} started")
             log_to_job(f"CWD: {job.cwd}")
             log_to_job(f"Environment overlays: {job.env}")
+
+        if verbose:
+            sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
+            sys.stdout.flush()
 
         # Write commands to a temp script to preserve state sequentially
         suffix = ".bat" if sys.platform == "win32" else ".sh"
@@ -165,13 +182,13 @@ def _execute_job_attempt(
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 if sys.platform == "win32":
                     f.write("@echo off\n")
-                    for cmd in job.commands:
+                    for cmd in commands:
                         f.write(f"{cmd}\n")
                         f.write("if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
                 else:
                     f.write("#!/bin/sh\n")
                     f.write("set -e\n")
-                    for cmd in job.commands:
+                    for cmd in commands:
                         f.write(f"{cmd}\n")
 
             executor = JobExecutor(verbose=verbose)
@@ -199,15 +216,16 @@ def _execute_job_attempt(
                     status_label = "ATTEMPT FAILED"
                 else:
                     status_label = "FAILED"
+                phase_label = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
                 if result.error_message:
                     log_to_job(
                         f"Process execution error: {result.error_message}")
-                    log_to_session(f"Job {job.name}: {status_label} "
+                    log_to_session(f"Job {job.name}{phase_label}: {status_label} "
                                    f"(Command failed: {result.error_message})")
                 else:
                     log_to_job(
                         f"Command failed with exit code {result.exit_code}")
-                    log_to_session(f"Job {job.name}: {status_label} "
+                    log_to_session(f"Job {job.name}{phase_label}: {status_label} "
                                    f"(Command failed with exit code "
                                    f"{result.exit_code})")
                 job_success = False
@@ -228,12 +246,24 @@ def _run_single_job(
     log_dir: Path,
     session_date: str,
     log_to_session,
+    phase_name: str | None = None,
+    commands: list[str] | None = None,
 ) -> tuple[bool, float]:
     """
-    Executes the commands inside a single job, coordinating retries and log files.
+    Executes the commands inside a single job or phase, coordinating retries and log files.
     Does not mutate scheduler orchestration state.
     """
-    job_log_path = log_dir / f"{session_date}_{job.name}.log"
+    if phase_name and phase_name != "default":
+        job_log_path = log_dir / f"{session_date}_{job.name}_{phase_name}.log"
+    else:
+        job_log_path = log_dir / f"{session_date}_{job.name}.log"
+
+    if commands is None:
+        if phase_name and phase_name in job.phases:
+            commands = job.phases[phase_name]
+        else:
+            commands = job.commands
+
     job_success = False
     job_duration = 0.0
     total_attempts = 1 + job.retries
@@ -248,6 +278,8 @@ def _run_single_job(
             total_attempts=total_attempts,
             job_log_path=job_log_path,
             log_to_session=log_to_session,
+            commands=commands,
+            phase_name=phase_name,
         )
 
         job_duration += time.perf_counter() - job_start_time
@@ -256,12 +288,24 @@ def _run_single_job(
             break
         else:
             if attempt < total_attempts:
-                log_to_session(f"Job {job.name} failed. Retrying in "
+                phase_str = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
+                log_to_session(f"Job {job.name}{phase_str} failed. Retrying in "
                                f"{job.retry_delay_seconds} seconds "
                                f"(attempt {attempt}/{job.retries})...")
                 time.sleep(job.retry_delay_seconds)
 
     return job_success, job_duration
+
+
+def _format_job_duration(dur: float | None) -> str:
+    """Formats job duration as HH:MM:SS (total seconds)."""
+    if dur is None:
+        return "(-)"
+    total_sec = int(dur)
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d} ({total_sec} seconds)"
 
 
 def _build_summary_text(
@@ -279,8 +323,8 @@ def _build_summary_text(
     for name, summary in job_summaries.items():
         status = summary["status"]
         dur = summary["duration"]
-        dur_str = f"{dur:.2f}s" if dur is not None else "-"
-        summary_lines.append(f"Job: {name:<20} ->  {status:<10} ({dur_str})")
+        dur_str = _format_job_duration(dur)
+        summary_lines.append(f"Job: {name:<20} ->  {status:<10} {dur_str}")
     summary_lines.append("=" * 50)
 
     session_status = "SUCCESS" if overall_success else "FAILED"
@@ -315,25 +359,28 @@ def _build_summary_text(
 
 
 class Scheduler:
-    """Orchestrates sequential execution of job queues, filtering, and logging."""
+    """Orchestrates execution of job queues, phase filtering, and logging."""
 
     @staticmethod
     def run(
         config: Config,
         job_filter: list[str] | str | None = None,
+        phase_filter: list[str] | str | None = None,
         dry_run: bool = False,
         resume: str | None = None,
         config_path: str | Path | None = None,
+        mode: str = "phased",
     ) -> bool:
         """
-        Main sequential execution loop for LBS jobs.
+        Main execution loop for LBS jobs.
         
         Creates the configured log directory, manages the session and job-specific
-        log files, runs commands sequentially under each job with environment overlays,
+        log files, runs commands or phases under each job with environment overlays,
         tracks durations, and returns True if all executed jobs succeeded, or False if any failed.
         
         If job_filter is specified, only executes jobs with names in the filter.
-        Raises ValueError if job_filter contains any invalid job names.
+        If phase_filter is specified, only executes phases with names in the filter.
+        Raises ValueError if filters contain invalid job or phase names.
         """
         session_start_time = time.perf_counter()
         # Normalize job_filter
@@ -359,6 +406,31 @@ class Scheduler:
             }
         else:
             jobs_to_run = {job.name for job in config.jobs}
+
+        # Normalize and validate phase_filter
+        if phase_filter is None:
+            p_filter_list = []
+        elif isinstance(phase_filter, str):
+            p_filter_list = [phase_filter]
+        else:
+            p_filter_list = list(phase_filter)
+
+        all_defined_phases = []
+        for j in config.jobs:
+            for p_name in j.phases.keys():
+                if p_name not in all_defined_phases:
+                    all_defined_phases.append(p_name)
+
+        if p_filter_list:
+            p_filter_set = set(p_filter_list)
+            invalid_phases = p_filter_set - set(all_defined_phases)
+            if invalid_phases:
+                raise ValueError(
+                    f"Phase filter contains invalid phase names: {', '.join(sorted(invalid_phases))}"
+                )
+            phases_to_run = [p for p in all_defined_phases if p in p_filter_set]
+        else:
+            phases_to_run = all_defined_phases
 
         # Resolve resume state if configured
         state_path = Path(config.settings.log_dir) / "lbs_state.json"
@@ -406,6 +478,10 @@ class Scheduler:
 
             # Reconstruct job summaries from state if resuming
             job_summaries = {}
+            job_durations = {}
+            job_failed = {}
+            job_phase_results = {}
+
             for job in config.jobs:
                 if resume == "latest" and job.name in succeeded_jobs:
                     job_info = saved_summaries.get(job.name, {})
@@ -420,6 +496,8 @@ class Scheduler:
                         "status": status_val,
                         "duration": None
                     }
+                job_durations[job.name] = 0.0
+                job_phase_results[job.name] = {}
 
             overall_success = True
             aborted = False
@@ -445,66 +523,70 @@ class Scheduler:
                 _save_state(state_path, config_path, session_date,
                             job_summaries)
 
+            verbose_mode = getattr(config.settings, "verbose", False)
+
             for job in config.jobs:
-                if job.name not in jobs_to_run:
-                    # Not selected by the job filter, leave as initialized
+                if job.name in jobs_to_run and not job.build_it:
+                    log_to_session(f"Job {job.name} is disabled. Skipping.")
+
+            # Build execution sequence of (job, phase_name) tuples based on mode
+            execution_tasks: list[tuple[Job, str]] = []
+            if mode == "phased":
+                for p_name in phases_to_run:
+                    for job in config.jobs:
+                        if job.name in jobs_to_run and job.build_it and p_name in job.phases:
+                            execution_tasks.append((job, p_name))
+            else:
+                for job in config.jobs:
+                    if job.name in jobs_to_run and job.build_it:
+                        for p_name in phases_to_run:
+                            if p_name in job.phases:
+                                execution_tasks.append((job, p_name))
+
+            current_phase_header = None
+            for job, phase_name in execution_tasks:
+                if job_summaries[job.name]["status"] == "SUCCESS" and resume == "latest":
                     continue
 
                 if not job.build_it:
-                    log_to_session(f"Job {job.name} is disabled. Skipping.")
-                    job_summaries[job.name] = {
-                        "status": "SKIPPED",
-                        "duration": None
-                    }
-                    _save_state(state_path, config_path, session_date,
-                                job_summaries)
-                    continue
-
-                if job_summaries[job.name]["status"] == "SUCCESS":
-                    # Already succeeded in previous run of this session! Skip it.
                     continue
 
                 if aborted:
-                    job_summaries[job.name] = {
-                        "status": "SKIPPED",
-                        "duration": None
-                    }
-                    _save_state(state_path, config_path, session_date,
-                                job_summaries)
+                    if job_summaries[job.name]["status"] == "PENDING":
+                        job_summaries[job.name]["status"] = "SKIPPED"
                     continue
 
-                log_to_session(f"Starting job: {job.name} (cwd: {job.cwd})")
+                if mode == "phased" and current_phase_header != phase_name and phase_name != "default":
+                    current_phase_header = phase_name
+                    log_to_session(f"--- Starting Phase: {phase_name} ---")
 
-                # Mark as PENDING during execution
-                job_summaries[job.name] = {
-                    "status": "PENDING",
-                    "duration": None
-                }
-                _save_state(state_path, config_path, session_date,
-                            job_summaries)
+                phase_display = f" (phase: {phase_name})" if phase_name != "default" else ""
+                log_to_session(f"Starting job: {job.name}{phase_display} (cwd: {job.cwd})")
 
-                verbose_mode = getattr(config.settings, "verbose", False)
-                job_success, job_duration = _run_single_job(
+                job_summaries[job.name]["status"] = "PENDING"
+                _save_state(state_path, config_path, session_date, job_summaries)
+
+                p_success, p_duration = _run_single_job(
                     job=job,
                     verbose=verbose_mode,
                     log_dir=log_dir,
                     session_date=session_date,
                     log_to_session=log_to_session,
+                    phase_name=phase_name,
+                    commands=job.phases[phase_name],
                 )
 
-                if job_success:
-                    log_to_session(
-                        f"Job {job.name}: SUCCESS (took {job_duration:.2f}s)")
-                    job_summaries[job.name] = {
-                        "status": "SUCCESS",
-                        "duration": job_duration
-                    }
+                job_durations[job.name] += p_duration
+                job_phase_results[job.name][phase_name] = p_success
+
+                if p_success:
+                    succ_msg = f"Job {job.name}{phase_display}: SUCCESS (took {p_duration:.2f}s)"
+                    log_to_session(succ_msg)
                 else:
                     overall_success = False
-                    job_summaries[job.name] = {
-                        "status": "FAILED",
-                        "duration": job_duration
-                    }
+                    job_failed[job.name] = True
+                    fail_msg = f"Job {job.name}{phase_display}: FAILED (took {p_duration:.2f}s)"
+                    log_to_session(fail_msg)
 
                     if config.settings.stop_on_failure:
                         log_to_session(
@@ -512,8 +594,27 @@ class Scheduler:
                         )
                         aborted = True
 
-                _save_state(state_path, config_path, session_date,
-                            job_summaries)
+                # Update job_summaries state for completed phases
+                target_phases = [p for p in job.phases.keys() if p in phases_to_run]
+                all_target_succeeded = all(
+                    job_phase_results[job.name].get(p) is True for p in target_phases
+                )
+                any_target_failed = any(
+                    job_phase_results[job.name].get(p) is False for p in target_phases
+                )
+
+                if any_target_failed:
+                    job_summaries[job.name] = {
+                        "status": "FAILED",
+                        "duration": job_durations[job.name]
+                    }
+                elif all_target_succeeded and len(job_phase_results[job.name]) == len(target_phases):
+                    job_summaries[job.name] = {
+                        "status": "SUCCESS",
+                        "duration": job_durations[job.name]
+                    }
+
+                _save_state(state_path, config_path, session_date, job_summaries)
 
             elapsed_time = time.perf_counter() - session_start_time
             (

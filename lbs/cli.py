@@ -62,9 +62,11 @@ def cmd_run(args: argparse.Namespace) -> None:
         success = Scheduler.run(
             config,
             job_filter=args.job,
+            phase_filter=getattr(args, "phase", None),
             dry_run=getattr(args, "dry_run", False),
             resume=getattr(args, "resume", None),
             config_path=args.config,
+            mode=getattr(args, "mode", "phased"),
         )
         if getattr(args, "shutdown", False):
             if getattr(args, "dry_run", False):
@@ -82,7 +84,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
     except ValueError as e:
-        if getattr(args, "job", None) or getattr(args, "resume", None):
+        if (getattr(args, "job", None) or getattr(args, "phase", None)
+                or getattr(args, "resume", None)):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
         raise
@@ -163,6 +166,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--job",
         action="append",
         help="Run specific job(s) by name. Can be specified multiple times.",
+    )
+    run_parser.add_argument(
+        "-p",
+        "--phase",
+        action="append",
+        help="Run specific phase(s) by name. Can be specified multiple times.",
+    )
+    run_parser.add_argument(
+        "--mode",
+        choices=["phased", "sequential"],
+        default="phased",
+        help="Execution strategy across jobs: 'phased' (runs phase by phase across active jobs) or 'sequential' (runs job by job).",
     )
     run_parser.add_argument(
         "--dry-run",
