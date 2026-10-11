@@ -30,7 +30,7 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 ## Installation
 
 > [!TIP]
-> If you are setting up LBS on a new machine for the first time, check out our step-by-step [Kickstart Guide](docs/kickstart.md) for detailed environment and config guidance.
+> If you are setting up LBS on a new machine for the first time, check out our step-by-step [Kickstart Guide](docs/kickstart.md). For an in-depth reference on YAML schemas, multi-phase pipelines, OS subprocess mechanics, and multi-clone repository setups, refer to the [Configuration Files Architecture & Usage Guide](docs/configuration_guide.md).
 
 Requires Python 3.11 or higher. It is recommended to run LBS within a Python virtual environment.
 
@@ -62,7 +62,7 @@ pip install -e .
 
 ## Configuration
 
-LBS uses YAML for configuration. The main configuration defines global settings and individual job blocks.
+LBS uses YAML for configuration. The main configuration defines global settings and individual job blocks. For full details on schema parameters, cross-job phases, Windows `cmd.exe` batch requirements, and repository isolation, refer to the [Comprehensive Configuration Files Architecture & Usage Guide](docs/configuration_guide.md).
 
 ### Example Main Configuration (`build-config.yaml`)
 

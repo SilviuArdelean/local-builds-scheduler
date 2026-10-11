@@ -82,6 +82,9 @@ lbs --version
 
 ## 3. Configuring Your First Build YAML File
 
+> [!TIP]
+> For a comprehensive deep-dive into advanced configuration architecture, multi-phase pipelines (`phases:`), Windows batch execution mechanics (`call`), submodule protection, and multi-clone repository setups, see the [Configuration Files Architecture & Usage Guide](configuration_guide.md).
+
 LBS uses a structured YAML format to define settings and sequential build jobs. Below is a minimal template:
 
 Create a new file named `my-build-config.yaml` in your workspace directory:
