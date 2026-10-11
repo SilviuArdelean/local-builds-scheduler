@@ -98,7 +98,7 @@ The configuration pipeline transforms raw YAML text into typed, validated Python
 +-----------------------------------------------------------------------+
 ```
 
-Key dataclass models defined in [`lbs.config`](file:///d:/sources/silviu/local-builds-scheduler/lbs/config.py):
+Key dataclass models defined in [`lbs.config`](../lbs/config.py):
 * `Config`: Top-level configuration container holding `settings` and `jobs`.
 * `Settings`: Global execution policies (`stop_on_failure`, `log_dir`, `verbose`, `notifications`).
 * `NotificationsConfig` & `EmailConfig`: Dispatch endpoints (webhooks, email SMTP, desktop alerts).
@@ -697,7 +697,6 @@ jobs:
         - "call setup_env.bat"
         - "call git fetch origin"
         - "call git reset --hard FETCH_HEAD"
-        - "if exist \"task_runner()\" del /f /q \"task_runner()\""
         - "call git clean -xffd -e *.bat -e /depot_tools/"
         - "cd depot_tools"
         - "call git reset --hard"
@@ -739,7 +738,7 @@ jobs:
 | **`The system cannot find the path specified.` with exit code 1 during clean.** | Running `git clean -xffd` without excluding `/depot_tools/`. Git deleted `depot_tools\git.bat` while `cmd.exe` was running it. | Add `-e /depot_tools/` to git clean: `call git clean -xffd -e *.bat -e /depot_tools/`. |
 | **`ConfigError: Job 'X' 'cwd' directory does not exist: ...`** | The directory specified in `cwd` is missing from the physical drive. LBS validates `cwd` even when `build_it: false`. | Create the folder on disk, correct the path, or comment out the job block in the YAML file. |
 | **`ConfigError: Job 'X' cannot specify both 'commands' and 'phases'`** | A single job block defines both `commands:` and `phases:`. | Select either `commands:` (for simple flat lists) or `phases:` (for multi-pass pipelines). |
-| **`Lock file 'lbs.lock' already acquired` (Exit code 2)** | Another LBS process is running in the same `log_dir`, or an interrupted session left a stale lock. | Verify no running instances in Task Manager. If none exist, remove `logs/lbs.lock`. |
+| **`Error: Another Local Builds Scheduler instance is already running.` (Exit code 2)** | Another LBS process is running in the same `log_dir`, or an interrupted session left a stale lock. | Verify no running instances in Task Manager. If none exist, remove `<log_dir>/lbs.lock` (for the default configuration, `logs/lbs.lock`). |
 | **Zscaler / VPN network timeout causes Job 2 to fail overnight.** | Running in sequential mode instead of phased mode. Job 1 compiled for 2 hours before Job 2 attempted to sync. | Structure jobs with `phases: sync / build`. Phased mode runs all sync steps upfront across all clones while online. |
 | **`update_depot_tools.bat` aborts with `Your local changes to the following files would be overwritten by checkout`.** | `bootstrap\win\win_tools.py` regenerated `python3.bat`, leaving the toolchain directory dirty. | Run `cd depot_tools && call git reset --hard && cd ..` before running `update_depot_tools.bat`. |
 
