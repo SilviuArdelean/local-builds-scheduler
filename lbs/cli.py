@@ -57,8 +57,9 @@ def cmd_run(args: argparse.Namespace) -> None:
             if not getattr(args, "notifications", False):
                 config.settings.notifications.on_success = False
                 config.settings.notifications.on_failure = False
-        if args.verbose:
-            config.settings.verbose = True
+        if getattr(args, "quiet", False):
+            config.settings.quiet = True
+            config.settings.verbose = False
         success = Scheduler.run(
             config,
             job_filter=args.job,
@@ -156,10 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
         "Skipped if any job fails, and on --dry-run.",
     )
     run_parser.add_argument(
-        "-v",
-        "--verbose",
+        "-q",
+        "--quiet",
         action="store_true",
-        help="Mirror execution output directly to standard output.",
+        help="Suppress live command output streaming to terminal. Full logs are still recorded to disk.",
     )
     run_parser.add_argument(
         "-j",
@@ -210,6 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.set_defaults(func=cmd_list)
 
     return parser
+
+
+create_parser = build_parser
 
 
 def main() -> None:
