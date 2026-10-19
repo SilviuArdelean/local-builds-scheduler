@@ -523,7 +523,9 @@ class Scheduler:
                 _save_state(state_path, config_path, session_date,
                             job_summaries)
 
-            verbose_mode = getattr(config.settings, "verbose", False)
+            verbose_mode = getattr(config.settings, "verbose", True)
+            if getattr(config.settings, "quiet", False):
+                verbose_mode = False
 
             for job in config.jobs:
                 if job.name in jobs_to_run and not job.build_it:

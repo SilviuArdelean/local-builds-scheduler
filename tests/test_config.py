@@ -773,3 +773,84 @@ def test_config_phases_validation(tmp_path):
     assert "phases' dictionary cannot be empty" in str(exc.value)
 
 
+def test_settings_default_verbose_and_quiet():
+    """Settings dataclass should have verbose=True and quiet=False by default."""
+    from lbs.config import Settings
+    s = Settings()
+    assert s.verbose is True
+    assert s.quiet is False
+
+
+def test_config_quiet_setting_true(tmp_path):
+    """YAML settings with quiet: true should result in quiet=True and verbose=False."""
+    config_file = tmp_path / "quiet.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      quiet: true
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+    config = load_config(config_file)
+    assert config.settings.quiet is True
+    assert config.settings.verbose is False
+
+
+def test_config_quiet_setting_false(tmp_path):
+    """YAML settings with quiet: false should result in quiet=False and verbose=True."""
+    config_file = tmp_path / "not_quiet.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      quiet: false
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+    config = load_config(config_file)
+    assert config.settings.quiet is False
+    assert config.settings.verbose is True
+
+
+def test_config_quiet_precedence_over_verbose(tmp_path):
+    """If both quiet: true and verbose: true are set, quiet should take precedence (verbose=False)."""
+    config_file = tmp_path / "precedence.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      quiet: true
+      verbose: true
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+    config = load_config(config_file)
+    assert config.settings.quiet is True
+    assert config.settings.verbose is False
+
+
+def test_config_invalid_quiet_type(tmp_path):
+    """Setting quiet to a non-boolean value should raise a ConfigError."""
+    config_file = tmp_path / "invalid_quiet.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      quiet: "yes"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file)
+    assert "'quiet' setting must be a boolean" in str(exc.value)
+
+

@@ -47,7 +47,8 @@ class Settings:
     """Global scheduler settings."""
     stop_on_failure: bool = False
     log_dir: str = "logs"
-    verbose: bool = False
+    verbose: bool = True
+    quiet: bool = False
     notifications: NotificationsConfig = field(
         default_factory=NotificationsConfig)
 
@@ -323,6 +324,10 @@ def _validate_settings(settings_data: dict) -> None:
         if not isinstance(settings_data["verbose"], bool):
             raise ConfigError("'verbose' setting must be a boolean")
 
+    if "quiet" in settings_data:
+        if not isinstance(settings_data["quiet"], bool):
+            raise ConfigError("'quiet' setting must be a boolean")
+
     if "notifications" in settings_data:
         _validate_notifications(settings_data["notifications"])
 
@@ -487,11 +492,19 @@ def load_config(path: str | Path,
         discord_webhook=notif_dict.get("discord_webhook", None),
         email=email_config)
 
-    settings = Settings(stop_on_failure=settings_dict.get(
-        "stop_on_failure", False),
-                        log_dir=settings_dict.get("log_dir", "logs"),
-                        verbose=settings_dict.get("verbose", False),
-                        notifications=notifications)
+    quiet_val = settings_dict.get("quiet", False)
+    if quiet_val:
+        verbose_val = False
+    else:
+        verbose_val = settings_dict.get("verbose", True)
+
+    settings = Settings(
+        stop_on_failure=settings_dict.get("stop_on_failure", False),
+        log_dir=settings_dict.get("log_dir", "logs"),
+        verbose=verbose_val,
+        quiet=quiet_val,
+        notifications=notifications,
+    )
 
     # Construct Job dataclasses
     jobs = []

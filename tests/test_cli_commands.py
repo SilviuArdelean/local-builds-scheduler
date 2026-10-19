@@ -298,7 +298,7 @@ def test_cli_run_shutdown(mock_sub_run, tmp_path):
 
     args = argparse.Namespace(
         config=str(config_file),
-        verbose=False,
+        quiet=False,
         job=None,
         dry_run=False,
         resume=None,
@@ -352,7 +352,7 @@ def test_cli_run_shutdown_failure(mock_sub_run, tmp_path, capsys):
 
     args = argparse.Namespace(
         config=str(config_file),
-        verbose=False,
+        quiet=False,
         job=None,
         dry_run=False,
         resume=None,
@@ -399,7 +399,7 @@ def test_cli_run_shutdown_skipped_when_job_fails(mock_sub_run, tmp_path,
 
     args = argparse.Namespace(
         config=str(config_file),
-        verbose=False,
+        quiet=False,
         job=None,
         dry_run=False,
         resume=None,
@@ -442,7 +442,7 @@ def test_cli_run_shutdown_skipped_on_dry_run(mock_sub_run, tmp_path, capsys):
 
     args = argparse.Namespace(
         config=str(config_file),
-        verbose=False,
+        quiet=False,
         job=None,
         dry_run=True,
         resume=None,
@@ -507,4 +507,108 @@ def test_cli_run_mode_sequential(tmp_path):
     assert result.returncode == 0
     assert "job-1                ->  SUCCESS" in result.stdout
     assert "job-2                ->  SUCCESS" in result.stdout
+
+
+def test_cli_argparser_quiet_flags():
+    """Verify that -q and --quiet are parsed, and --verbose is rejected."""
+    from lbs.cli import build_parser
+
+    parser = build_parser()
+    args_short = parser.parse_args(["run", "config.yaml", "-q"])
+    assert args_short.quiet is True
+
+    args_long = parser.parse_args(["run", "config.yaml", "--quiet"])
+    assert args_long.quiet is True
+
+    args_default = parser.parse_args(["run", "config.yaml"])
+    assert args_default.quiet is False
+
+    # --verbose should no longer be accepted
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "config.yaml", "--verbose"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "config.yaml", "-v"])
+
+
+def test_cli_run_default_streaming(tmp_path):
+    """Running 'lbs run' without -q should default to verbose=True (live streaming enabled)."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=False,
+        job=None,
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=False,
+    )
+
+    with local_patch("lbs.cli.Scheduler.run") as mock_sched_run, local_patch("sys.exit"):
+        mock_sched_run.return_value = True
+        cmd_run(args)
+        assert mock_sched_run.call_count == 1
+        config_passed = mock_sched_run.call_args[0][0]
+        assert config_passed.settings.verbose is True
+        assert config_passed.settings.quiet is False
+
+
+def test_cli_run_quiet_flag(tmp_path):
+    """Running 'lbs run' with quiet=True should set verbose=False and quiet=True."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=True,
+        job=None,
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=False,
+    )
+
+    with local_patch("lbs.cli.Scheduler.run") as mock_sched_run, local_patch("sys.exit"):
+        mock_sched_run.return_value = True
+        cmd_run(args)
+        assert mock_sched_run.call_count == 1
+        config_passed = mock_sched_run.call_args[0][0]
+        assert config_passed.settings.verbose is False
+        assert config_passed.settings.quiet is True
 

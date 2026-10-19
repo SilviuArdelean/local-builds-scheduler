@@ -153,10 +153,10 @@ The global entry point is `lbs`. It provides several subcommands.
 
 | Use Case / Goal | Command Invocations | Description & Behavior |
 | :--- | :--- | :--- |
-| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially. |
+| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially, streaming live command output to the console. |
+| **Quiet Run** | `lbs run config.yaml -q` | Suppresses live command output streaming to the terminal (silent mode); logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
-| **Verbose Debugging** | `lbs run config.yaml -v` | Mirrors command stdout/stderr directly to standard output in real-time while also saving logs to disk. |
 | **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the failed or skipped jobs from the previous session. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
@@ -181,7 +181,7 @@ lbs run <config-path> [options]
 ```
 
 **Options:**
-* `-v`, `--verbose` — Mirror command execution stdout/stderr directly to standard output (in addition to writing log files).
+* `-q`, `--quiet` — Suppress live command execution output from being streamed to the console (full logs are still recorded to disk under `log_dir`, and the final summary table is still printed).
 * `-j <job-name>`, `--job <job-name>` — Filter to run *only* the specified job. Can be specified multiple times (e.g. `lbs run config.yaml -j compile -j test`).
 * `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
 * `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the failed or skipped jobs.
