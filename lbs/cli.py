@@ -213,9 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-create_parser = build_parser
-
-
 def main() -> None:
     """Main entry point for the lbs CLI."""
     parser = build_parser()
