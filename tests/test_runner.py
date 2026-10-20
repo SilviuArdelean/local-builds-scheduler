@@ -9,8 +9,13 @@ import datetime
 import os
 import sys
 from pathlib import Path
-from lbs.config import Config, Settings, Job
-from lbs.runner import run_scheduler
+from lbs.config import Config, Settings, Job, BuildStatus
+from lbs.runner import (
+    run_scheduler,
+    CommandTask,
+    build_job_command_tasks,
+    compute_build_status,
+)
 
 
 def test_runner_success(tmp_path):
@@ -388,3 +393,101 @@ def test_runner_environment_persistence(tmp_path):
     job_log_content = job_log.read_text(encoding="utf-8")
 
     assert "LBS_ENV_VAL:success_env" in job_log_content
+
+
+def test_command_task_serialization():
+    """Verify CommandTask dict conversion and roundtrip parsing."""
+    task = CommandTask(
+        index=2,
+        phase="build",
+        command="python3 build.py",
+        status=BuildStatus.DONE,
+        exit_code=0,
+        duration=12.34567,
+    )
+    d = task.to_dict()
+    assert d == {
+        "index": 2,
+        "phase": "build",
+        "command": "python3 build.py",
+        "status": "DONE",
+        "exit_code": 0,
+        "duration": 12.3457,
+    }
+
+    restored = CommandTask.from_dict(d)
+    assert restored.index == 2
+    assert restored.phase == "build"
+    assert restored.command == "python3 build.py"
+    assert restored.status == BuildStatus.DONE
+    assert restored.exit_code == 0
+    assert restored.duration == 12.3457
+
+    # Test fallback on invalid status
+    invalid_data = {"status": "INVALID_STATE", "command": "echo test"}
+    fallback_task = CommandTask.from_dict(invalid_data)
+    assert fallback_task.status == BuildStatus.PENDING
+
+
+def test_build_job_command_tasks(tmp_path):
+    """Verify building ordered command tasks for flat commands and phased jobs."""
+    # 1. Flat commands
+    job_flat = Job(
+        name="flat-job",
+        cwd=str(tmp_path),
+        commands=["echo 1", "echo 2"],
+    )
+    tasks_flat = build_job_command_tasks(job_flat)
+    assert len(tasks_flat) == 2
+    assert tasks_flat[0].index == 0
+    assert tasks_flat[0].phase == "default"
+    assert tasks_flat[0].command == "echo 1"
+    assert tasks_flat[0].status == BuildStatus.PENDING
+    assert tasks_flat[1].index == 1
+    assert tasks_flat[1].command == "echo 2"
+
+    # 2. Phased commands
+    job_phased = Job(
+        name="phased-job",
+        cwd=str(tmp_path),
+        phases={
+            "sync": ["fetch_sources"],
+            "build": ["configure", "compile"],
+        },
+    )
+    tasks_phased = build_job_command_tasks(job_phased)
+    assert len(tasks_phased) == 3
+    assert [(t.index, t.phase, t.command) for t in tasks_phased] == [
+        (0, "sync", "fetch_sources"),
+        (1, "build", "configure"),
+        (2, "build", "compile"),
+    ]
+    assert all(t.status == BuildStatus.PENDING for t in tasks_phased)
+
+
+def test_compute_build_status():
+    """Verify computing aggregate BuildStatus from command tasks list."""
+    # 1. Disabled job
+    assert compute_build_status([], job_build_it=False) == BuildStatus.SKIPPED
+
+    # 2. Empty tasks list
+    assert compute_build_status([], job_build_it=True) == BuildStatus.DONE
+
+    # 3. All pending
+    t0 = CommandTask(index=0, phase="build", command="cmd0", status=BuildStatus.PENDING)
+    t1 = CommandTask(index=1, phase="build", command="cmd1", status=BuildStatus.PENDING)
+    assert compute_build_status([t0, t1]) == BuildStatus.PENDING
+
+    # 4. In progress (RUNNING)
+    t0.status = BuildStatus.DONE
+    t1.status = BuildStatus.RUNNING
+    assert compute_build_status([t0, t1]) == BuildStatus.RUNNING
+
+    # 5. Failed
+    t1.status = BuildStatus.FAILED
+    assert compute_build_status([t0, t1]) == BuildStatus.FAILED
+
+    # 6. All Done
+    t1.status = BuildStatus.DONE
+    assert compute_build_status([t0, t1]) == BuildStatus.DONE
+
