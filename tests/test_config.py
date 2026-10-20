@@ -7,7 +7,13 @@ Unit tests for the configuration module (loading and validation).
 
 from pathlib import Path
 import pytest
-from lbs.config import load_config, validate_config, ConfigError
+from lbs.config import (
+    load_config,
+    validate_config,
+    ConfigError,
+    BuildStatus,
+    resolve_status_path,
+)
 
 
 def test_valid_config_loading(tmp_path):
@@ -852,5 +858,42 @@ def test_config_invalid_quiet_type(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(config_file)
     assert "'quiet' setting must be a boolean" in str(exc.value)
+
+
+def test_build_status_enum():
+    """Verify BuildStatus enum members, string conversion, and equality."""
+    assert BuildStatus.PENDING == "PENDING"
+    assert BuildStatus.RUNNING == "RUNNING"
+    assert BuildStatus.FAILED == "FAILED"
+    assert BuildStatus.DONE == "DONE"
+    assert BuildStatus.SKIPPED == "SKIPPED"
+    assert str(BuildStatus.DONE) == "BuildStatus.DONE"
+    assert BuildStatus.DONE.value == "DONE"
+    # Ensure it inherits from str for easy JSON serialization
+    assert isinstance(BuildStatus.DONE, str)
+
+
+def test_resolve_status_path():
+    """Verify profile-scoped status path resolution and fallbacks."""
+    # 1. Profile-specific string path
+    p1 = resolve_status_path("logs", "configs/build-debug.yaml")
+    assert p1 == Path("logs/lbs_status_build-debug.json")
+
+    # 2. Profile-specific Path object with nested directories
+    p2 = resolve_status_path(Path("custom_logs"), Path("/workspace/configs/nightly-release.yaml"))
+    assert p2 == Path("custom_logs/lbs_status_nightly-release.json")
+
+    # 3. None config_file fallback
+    p3 = resolve_status_path("logs", None)
+    assert p3 == Path("logs/lbs_status.json")
+
+    # 4. Default argument fallback
+    p4 = resolve_status_path("logs")
+    assert p4 == Path("logs/lbs_status.json")
+
+    # 5. Empty string fallback
+    p5 = resolve_status_path(Path("logs"), "   ")
+    assert p5 == Path("logs/lbs_status.json")
+
 
 
