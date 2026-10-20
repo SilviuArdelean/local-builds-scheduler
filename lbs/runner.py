@@ -106,6 +106,52 @@ def compute_build_status(
     return BuildStatus.PENDING
 
 
+def _serialize_job_summary(info: dict) -> dict:
+    """Serializes a single job summary dictionary for status persistence."""
+    raw_commands = info.get("commands", [])
+    serialized_commands = []
+    for cmd_item in raw_commands:
+        if isinstance(cmd_item, CommandTask):
+            serialized_commands.append(cmd_item.to_dict())
+        elif isinstance(cmd_item, dict):
+            serialized_commands.append(cmd_item)
+
+    build_status = info.get("build_status")
+    if build_status is None:
+        if raw_commands and all(isinstance(c, CommandTask) for c in raw_commands):
+            build_status = compute_build_status(raw_commands).value
+        else:
+            legacy_status = info.get("status")
+            if legacy_status == "SUCCESS":
+                build_status = BuildStatus.DONE.value
+            elif legacy_status in (
+                BuildStatus.FAILED.value,
+                BuildStatus.PENDING.value,
+                BuildStatus.SKIPPED.value,
+                BuildStatus.RUNNING.value,
+            ):
+                build_status = legacy_status
+            else:
+                build_status = BuildStatus.PENDING.value
+
+    status_val = info.get("status", build_status)
+    duration_val = info.get("duration")
+    if duration_val is not None:
+        duration_val = round(duration_val, 4)
+
+    job_record = {
+        "build_status": build_status if isinstance(build_status, str) else build_status.value,
+        "status": status_val if isinstance(status_val, str) else status_val.value,
+        "duration": duration_val,
+    }
+    if serialized_commands:
+        job_record["commands"] = serialized_commands
+    if "cwd" in info:
+        job_record["cwd"] = info["cwd"]
+
+    return job_record
+
+
 def _save_status(
     status_path: Path,
     config_file: str | Path | None,
@@ -113,50 +159,10 @@ def _save_status(
     job_summaries: dict,
 ) -> None:
     """Save the current execution status atomically to JSON."""
-    serializable_jobs = {}
-    for name, info in job_summaries.items():
-        raw_commands = info.get("commands", [])
-        serialized_commands = []
-        for cmd_item in raw_commands:
-            if isinstance(cmd_item, CommandTask):
-                serialized_commands.append(cmd_item.to_dict())
-            elif isinstance(cmd_item, dict):
-                serialized_commands.append(cmd_item)
-
-        build_status = info.get("build_status")
-        if build_status is None:
-            if raw_commands and all(isinstance(c, CommandTask) for c in raw_commands):
-                build_status = compute_build_status(raw_commands).value
-            else:
-                legacy_status = info.get("status")
-                if legacy_status == "SUCCESS":
-                    build_status = BuildStatus.DONE.value
-                elif legacy_status in (
-                    BuildStatus.FAILED.value,
-                    BuildStatus.PENDING.value,
-                    BuildStatus.SKIPPED.value,
-                    BuildStatus.RUNNING.value,
-                ):
-                    build_status = legacy_status
-                else:
-                    build_status = BuildStatus.PENDING.value
-
-        status_val = info.get("status", build_status)
-        duration_val = info.get("duration")
-        if duration_val is not None:
-            duration_val = round(duration_val, 4)
-
-        job_record = {
-            "build_status": build_status if isinstance(build_status, str) else build_status.value,
-            "status": status_val if isinstance(status_val, str) else status_val.value,
-            "duration": duration_val,
-        }
-        if serialized_commands:
-            job_record["commands"] = serialized_commands
-        if "cwd" in info:
-            job_record["cwd"] = info["cwd"]
-
-        serializable_jobs[name] = job_record
+    serializable_jobs = {
+        name: _serialize_job_summary(info)
+        for name, info in job_summaries.items()
+    }
 
     data = {
         "config_file": str(config_file) if config_file is not None else None,
@@ -198,51 +204,12 @@ def _save_status(
 _save_state = _save_status
 
 
-def _parse_and_validate_resume_status(status_path: Path) -> tuple[str, dict]:
-    """Loads, validates, and returns (session_date, saved_summaries)
-    from the status file. If status_path does not exist, checks legacy
-    lbs_status.json and lbs_state.json fallbacks in the same directory.
-    """
-    target_path = status_path
-    if not target_path.is_file():
-        fallback_status = status_path.parent / "lbs_status.json"
-        fallback_legacy = status_path.parent / "lbs_state.json"
-        if fallback_status.is_file():
-            target_path = fallback_status
-        elif fallback_legacy.is_file():
-            target_path = fallback_legacy
-        else:
-            raise ValueError("No active session state found to resume.")
-
-    try:
-        with open(target_path, "r", encoding="utf-8") as f:
-            status_data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        raise ValueError(f"Failed to load session state: {e}") from e
-
-    if not isinstance(status_data, dict):
-        raise ValueError(
-            "Failed to load session state: state file content is not a JSON object"
-        )
-
-    saved_summaries = status_data.get("jobs")
-    if not isinstance(saved_summaries, dict):
-        raise ValueError(
-            "Failed to load session state: 'jobs' field is missing or not a JSON object"
-        )
-
-    session_date = status_data.get("session_date")
-    if not isinstance(session_date, str):
-        raise ValueError(
-            "Failed to load session state: 'session_date' field is missing or not a string"
-        )
-
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
-        raise ValueError(
-            f"Failed to load session state: invalid session_date format '{session_date}'"
-        )
-
-    # Detect and reconcile stale RUNNING states (interrupted executions)
+def _reconcile_stale_running_status(
+    target_path: Path,
+    status_data: dict,
+    saved_summaries: dict,
+) -> bool:
+    """Detects and reconciles stale RUNNING states (from interrupted runs) to FAILED."""
     stale_reconciled = False
     for job_name, info in saved_summaries.items():
         if not isinstance(info, dict):
@@ -303,11 +270,134 @@ def _parse_and_validate_resume_status(status_path: Path) -> tuple[str, dict]:
                 except OSError:
                     pass
 
+    return stale_reconciled
+
+
+def _parse_and_validate_resume_status(status_path: Path) -> tuple[str, dict]:
+    """Loads, validates, and returns (session_date, saved_summaries)
+    from the status file. If status_path does not exist, checks legacy
+    lbs_status.json and lbs_state.json fallbacks in the same directory.
+    """
+    target_path = status_path
+    if not target_path.is_file():
+        fallback_status = status_path.parent / "lbs_status.json"
+        fallback_legacy = status_path.parent / "lbs_state.json"
+        if fallback_status.is_file():
+            target_path = fallback_status
+        elif fallback_legacy.is_file():
+            target_path = fallback_legacy
+        else:
+            raise ValueError("No active session state found to resume.")
+
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            status_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Failed to load session state: {e}") from e
+
+    if not isinstance(status_data, dict):
+        raise ValueError(
+            "Failed to load session state: state file content is not a JSON object"
+        )
+
+    saved_summaries = status_data.get("jobs")
+    if not isinstance(saved_summaries, dict):
+        raise ValueError(
+            "Failed to load session state: 'jobs' field is missing or not a JSON object"
+        )
+
+    session_date = status_data.get("session_date")
+    if not isinstance(session_date, str):
+        raise ValueError(
+            "Failed to load session state: 'session_date' field is missing or not a string"
+        )
+
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", session_date):
+        raise ValueError(
+            f"Failed to load session state: invalid session_date format '{session_date}'"
+        )
+
+    _reconcile_stale_running_status(target_path, status_data, saved_summaries)
+
     return session_date, saved_summaries
 
 
 # Backward-compatible alias
 _parse_and_validate_resume_state = _parse_and_validate_resume_status
+
+
+def _restore_job_command_tasks(job: Job, saved_cmds: list[dict]) -> list[CommandTask]:
+    """Reconstructs and overlays saved command statuses onto the job's command tasks."""
+    default_tasks = build_job_command_tasks(job)
+    if not saved_cmds:
+        return default_tasks
+
+    restored_tasks = []
+    for t in default_tasks:
+        matching = next(
+            (
+                c for c in saved_cmds
+                if isinstance(c, dict) and (
+                    c.get("index") == t.index
+                    or (c.get("command") == t.command and c.get("phase") == t.phase)
+                )
+            ),
+            None,
+        )
+        if matching:
+            raw_st = matching.get("status", BuildStatus.PENDING.value)
+            try:
+                t.status = BuildStatus(raw_st)
+            except ValueError:
+                t.status = BuildStatus.PENDING
+            t.exit_code = matching.get("exit_code")
+            t.duration = matching.get("duration")
+        restored_tasks.append(t)
+    return restored_tasks
+
+
+def _print_dry_run_job_metadata(job: Job) -> None:
+    """Prints standard CWD, environment, retry, and timeout metadata for a job."""
+    print(f"  CWD: {job.cwd}")
+    env_str = ", ".join(f"{k}={v}" for k, v in job.env.items()) if job.env else "None"
+    print(f"  Environment: {env_str}")
+    if job.retries > 0:
+        print(f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)")
+    if job.command_timeout_minutes is not None:
+        print(f"  Timeout: {job.command_timeout_minutes}m")
+
+
+def _print_dry_run_resume_commands(tasks: list[CommandTask]) -> None:
+    """Prints command tasks with [DONE], [RESUME], and [PENDING] tags."""
+    print("  Commands:")
+    first_incomplete = True
+    for t in tasks:
+        if t.status == BuildStatus.DONE:
+            tag = "[DONE]"
+            dur_str = f" (took {t.duration:.1f}s)" if t.duration is not None else ""
+        elif first_incomplete:
+            tag = "[RESUME]"
+            first_incomplete = False
+            dur_str = ""
+        else:
+            tag = "[PENDING]"
+            dur_str = ""
+        phase_tag = f"({t.phase})  " if t.phase != "default" else ""
+        print(f"    {tag:<10}{phase_tag}{t.command}{dur_str}")
+
+
+def _print_dry_run_standard_commands(job: Job) -> None:
+    """Prints command list or phases for a normal dry-run execution."""
+    if len(job.phases) == 1 and "default" in job.phases:
+        print("  Commands:")
+        for cmd in job.phases["default"]:
+            print(f"    - {cmd}")
+    else:
+        print("  Phases:")
+        for phase_name, cmds in job.phases.items():
+            print(f"    [{phase_name}]")
+            for cmd in cmds:
+                print(f"      - {cmd}")
 
 
 def _print_dry_run_plan(
@@ -337,82 +427,186 @@ def _print_dry_run_plan(
             print(f"Job: {job.name} [ALREADY SUCCEEDED]")
             continue
 
-        # Handle resume command-level visualization
         if resume == "latest" and saved_summaries is not None:
-            default_tasks = build_job_command_tasks(job)
             job_info = saved_summaries.get(job.name, {})
             saved_cmds = job_info.get("commands", [])
-            for t in default_tasks:
-                matching = next(
-                    (c for c in saved_cmds
-                     if isinstance(c, dict) and (c.get("index") == t.index or (c.get("command") == t.command and c.get("phase") == t.phase))),
-                    None,
-                )
-                if matching:
-                    raw_st = matching.get("status", BuildStatus.PENDING.value)
-                    try:
-                        t.status = BuildStatus(raw_st)
-                    except ValueError:
-                        t.status = BuildStatus.PENDING
-                    t.duration = matching.get("duration")
-
-            done_count = sum(1 for t in default_tasks if t.status == BuildStatus.DONE)
-            total_count = len(default_tasks)
+            tasks = _restore_job_command_tasks(job, saved_cmds)
+            done_count = sum(1 for t in tasks if t.status == BuildStatus.DONE)
+            total_count = len(tasks)
             if done_count > 0:
                 print(f"Job: {job.name} [RESUMING - {done_count} of {total_count} commands completed]")
             else:
                 print(f"Job: {job.name}")
 
-            print(f"  CWD: {job.cwd}")
-            env_str = (", ".join(
-                f"{k}={v}" for k, v in job.env.items()) if job.env else "None")
-            print(f"  Environment: {env_str}")
-            if job.retries > 0:
-                print(
-                    f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)"
-                )
-            if job.command_timeout_minutes is not None:
-                print(f"  Timeout: {job.command_timeout_minutes}m")
-            print("  Commands:")
-            first_incomplete = True
-            for t in default_tasks:
-                if t.status == BuildStatus.DONE:
-                    tag = "[DONE]"
-                    dur_str = f" (took {t.duration:.1f}s)" if t.duration is not None else ""
-                elif first_incomplete:
-                    tag = "[RESUME]"
-                    first_incomplete = False
-                    dur_str = ""
-                else:
-                    tag = "[PENDING]"
-                    dur_str = ""
-                phase_tag = f"({t.phase})  " if t.phase != "default" else ""
-                print(f"    {tag:<10}{phase_tag}{t.command}{dur_str}")
+            _print_dry_run_job_metadata(job)
+            _print_dry_run_resume_commands(tasks)
             print()
             continue
 
         print(f"Job: {job.name}")
-        print(f"  CWD: {job.cwd}")
-        env_str = (", ".join(
-            f"{k}={v}" for k, v in job.env.items()) if job.env else "None")
-        print(f"  Environment: {env_str}")
-        if job.retries > 0:
-            print(
-                f"  Retries: {job.retries} (delay: {job.retry_delay_seconds}s)"
-            )
-        if job.command_timeout_minutes is not None:
-            print(f"  Timeout: {job.command_timeout_minutes}m")
-        if len(job.phases) == 1 and "default" in job.phases:
-            print("  Commands:")
-            for cmd in job.phases["default"]:
-                print(f"    - {cmd}")
-        else:
-            print("  Phases:")
-            for phase_name, cmds in job.phases.items():
-                print(f"    [{phase_name}]")
-                for cmd in cmds:
-                    print(f"      - {cmd}")
+        _print_dry_run_job_metadata(job)
+        _print_dry_run_standard_commands(job)
         print()
+
+
+def _generate_job_script(
+    commands: list[str],
+    tasks: list[CommandTask] | None,
+    progress_path: Path | None,
+    is_win: bool,
+) -> str:
+    """Generates the shell or batch script content with progress event emissions."""
+    lines: list[str] = []
+    if is_win:
+        lines.append("@echo off\n")
+        if tasks and progress_path:
+            for i, cmd in enumerate(commands):
+                lines.append(f'>>"{progress_path}" echo START:{i}\n')
+                lines.append(f"{cmd}\n")
+                lines.append("if %ERRORLEVEL% neq 0 (\n")
+                lines.append(f'    >>"{progress_path}" echo FAIL:{i}:%ERRORLEVEL%\n')
+                lines.append("    exit /b %ERRORLEVEL%\n")
+                lines.append(")\n")
+                lines.append(f'>>"{progress_path}" echo DONE:{i}:0\n')
+        else:
+            for cmd in commands:
+                lines.append(f"{cmd}\n")
+                lines.append("if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
+    else:
+        lines.append("#!/bin/sh\n")
+        if tasks and progress_path:
+            lines.append("__lbs_current=0\n")
+            lines.append(
+                f'trap \'__lbs_rc=$?; if [ $__lbs_rc -ne 0 ]; then echo "FAIL:${{__lbs_current}}:$__lbs_rc" >> "{progress_path}"; fi\' EXIT\n'
+            )
+            lines.append("set -e\n")
+            for i, cmd in enumerate(commands):
+                lines.append(f"__lbs_current={i}\n")
+                lines.append(f'echo "START:{i}" >> "{progress_path}"\n')
+                lines.append(f"{cmd}\n")
+                lines.append(f'echo "DONE:{i}:0" >> "{progress_path}"\n')
+            lines.append("trap - EXIT\n")
+        else:
+            lines.append("set -e\n")
+            for cmd in commands:
+                lines.append(f"{cmd}\n")
+    return "".join(lines)
+
+
+class _JobProgressMonitor:
+    """Monitors per-command progress in the background and updates tasks idempotently."""
+
+    def __init__(
+        self,
+        tasks: list[CommandTask],
+        progress_path: Path,
+        on_status_change=None,
+    ) -> None:
+        self.tasks = tasks
+        self.progress_path = progress_path
+        self.on_status_change = on_status_change
+        self.stop_event = threading.Event()
+        self.task_start_times: dict[int, float] = {}
+        self.last_pos = 0
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+
+    def stop_and_drain(self) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        self._drain()
+
+    def _drain(self) -> None:
+        if self.progress_path.is_file():
+            try:
+                with open(self.progress_path, "r", encoding="utf-8", errors="replace") as pf:
+                    pf.seek(self.last_pos)
+                    for line in pf:
+                        self.apply_line(line)
+                    self.last_pos = pf.tell()
+            except Exception:
+                pass
+
+    def _monitor_loop(self) -> None:
+        while not self.stop_event.is_set():
+            self._drain()
+            self.stop_event.wait(0.05)
+
+    def apply_line(self, raw_line: str) -> None:
+        line = raw_line.strip()
+        if not line:
+            return
+        parts = line.split(":")
+        if len(parts) < 2:
+            return
+        action = parts[0]
+        try:
+            cmd_idx = int(parts[1])
+        except ValueError:
+            return
+        if not (0 <= cmd_idx < len(self.tasks)):
+            return
+
+        t = self.tasks[cmd_idx]
+        # Idempotency guard: ignore replayed events for tasks that already reached a terminal state
+        if t.status in (BuildStatus.DONE, BuildStatus.FAILED):
+            return
+
+        if action == "START":
+            t.status = BuildStatus.RUNNING
+            if cmd_idx not in self.task_start_times:
+                self.task_start_times[cmd_idx] = time.perf_counter()
+            if self.on_status_change:
+                self.on_status_change()
+        elif action == "DONE":
+            t.status = BuildStatus.DONE
+            t.exit_code = 0
+            if cmd_idx in self.task_start_times and t.duration is None:
+                t.duration = round(time.perf_counter() - self.task_start_times[cmd_idx], 4)
+            if self.on_status_change:
+                self.on_status_change()
+        elif action == "FAIL":
+            t.status = BuildStatus.FAILED
+            exit_code = 1
+            if len(parts) > 2:
+                try:
+                    exit_code = int(parts[2])
+                except ValueError:
+                    exit_code = 1
+            t.exit_code = exit_code
+            if cmd_idx in self.task_start_times and t.duration is None:
+                t.duration = round(time.perf_counter() - self.task_start_times[cmd_idx], 4)
+            if self.on_status_change:
+                self.on_status_change()
+
+
+def _reconcile_attempt_failure(
+    tasks: list[CommandTask],
+    exit_code: int | None,
+    task_start_times: dict[int, float],
+    on_status_change=None,
+) -> None:
+    """Reconciles RUNNING or unstarted tasks to FAILED when the job execution script exits non-zero."""
+    for idx, t in enumerate(tasks):
+        if t.status == BuildStatus.RUNNING:
+            t.status = BuildStatus.FAILED
+            t.exit_code = exit_code if exit_code is not None else 1
+            if idx in task_start_times and t.duration is None:
+                t.duration = round(time.perf_counter() - task_start_times[idx], 4)
+    if not any(t.status == BuildStatus.FAILED for t in tasks):
+        for idx, t in enumerate(tasks):
+            if t.status != BuildStatus.DONE:
+                t.status = BuildStatus.FAILED
+                t.exit_code = exit_code if exit_code is not None else 1
+                if idx in task_start_times and t.duration is None:
+                    t.duration = round(time.perf_counter() - task_start_times[idx], 4)
+                break
+    if on_status_change:
+        on_status_change()
 
 
 def _execute_job_attempt(
@@ -455,10 +649,9 @@ def _execute_job_attempt(
             sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
             sys.stdout.flush()
 
-        # Write commands to a temp script to preserve state sequentially
-        suffix = ".bat" if sys.platform == "win32" else ".sh"
-        fd, temp_script_path_str = tempfile.mkstemp(suffix=suffix,
-                                                    prefix="lbs_job_")
+        is_win = sys.platform == "win32"
+        suffix = ".bat" if is_win else ".sh"
+        fd, temp_script_path_str = tempfile.mkstemp(suffix=suffix, prefix="lbs_job_")
         temp_script_path = Path(temp_script_path_str)
 
         progress_path = None
@@ -467,118 +660,19 @@ def _execute_job_attempt(
             os.close(prog_fd)
             progress_path = Path(prog_path_str)
 
+        monitor: _JobProgressMonitor | None = None
         try:
+            script_content = _generate_job_script(commands, tasks, progress_path, is_win)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                if sys.platform == "win32":
-                    f.write("@echo off\n")
-                    if tasks and progress_path:
-                        for i, cmd in enumerate(commands):
-                            f.write(f'>>"{progress_path}" echo START:{i}\n')
-                            f.write(f"{cmd}\n")
-                            f.write("if %ERRORLEVEL% neq 0 (\n")
-                            f.write(f'    >>"{progress_path}" echo FAIL:{i}:%ERRORLEVEL%\n')
-                            f.write("    exit /b %ERRORLEVEL%\n")
-                            f.write(")\n")
-                            f.write(f'>>"{progress_path}" echo DONE:{i}:0\n')
-                    else:
-                        for cmd in commands:
-                            f.write(f"{cmd}\n")
-                            f.write("if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
-                else:
-                    f.write("#!/bin/sh\n")
-                    if tasks and progress_path:
-                        f.write("__lbs_current=0\n")
-                        f.write(f'trap \'__lbs_rc=$?; if [ $__lbs_rc -ne 0 ]; then echo "FAIL:${{__lbs_current}}:$__lbs_rc" >> "{progress_path}"; fi\' EXIT\n')
-                        f.write("set -e\n")
-                        for i, cmd in enumerate(commands):
-                            f.write(f"__lbs_current={i}\n")
-                            f.write(f'echo "START:{i}" >> "{progress_path}"\n')
-                            f.write(f"{cmd}\n")
-                            f.write(f'echo "DONE:{i}:0" >> "{progress_path}"\n')
-                        f.write("trap - EXIT\n")
-                    else:
-                        f.write("set -e\n")
-                        for cmd in commands:
-                            f.write(f"{cmd}\n")
-
-            monitor_thread = None
-            stop_monitor = threading.Event()
-            task_start_times: dict[int, float] = {}
-            last_pos = [0]
+                f.write(script_content)
 
             if tasks and progress_path:
-                def apply_progress_line(raw_line: str) -> None:
-                    line = raw_line.strip()
-                    if not line:
-                        return
-                    parts = line.split(":")
-                    if len(parts) >= 2:
-                        action = parts[0]
-                        try:
-                            cmd_idx = int(parts[1])
-                        except ValueError:
-                            return
-                        if 0 <= cmd_idx < len(tasks):
-                            t = tasks[cmd_idx]
-                            # Idempotency guard: ignore replayed events for tasks that already reached a terminal state
-                            if t.status in (BuildStatus.DONE, BuildStatus.FAILED):
-                                return
-
-                            if action == "START":
-                                t.status = BuildStatus.RUNNING
-                                if cmd_idx not in task_start_times:
-                                    task_start_times[cmd_idx] = time.perf_counter()
-                                if on_status_change:
-                                    on_status_change()
-                            elif action == "DONE":
-                                t.status = BuildStatus.DONE
-                                t.exit_code = 0
-                                if cmd_idx in task_start_times and t.duration is None:
-                                    t.duration = round(time.perf_counter() - task_start_times[cmd_idx], 4)
-                                if on_status_change:
-                                    on_status_change()
-                            elif action == "FAIL":
-                                t.status = BuildStatus.FAILED
-                                exit_code = 1
-                                if len(parts) > 2:
-                                    try:
-                                        exit_code = int(parts[2])
-                                    except ValueError:
-                                        exit_code = 1
-                                t.exit_code = exit_code
-                                if cmd_idx in task_start_times and t.duration is None:
-                                    t.duration = round(time.perf_counter() - task_start_times[cmd_idx], 4)
-                                if on_status_change:
-                                    on_status_change()
-
-                def monitor_progress() -> None:
-                    while not stop_monitor.is_set():
-                        if progress_path.is_file():
-                            try:
-                                with open(progress_path, "r", encoding="utf-8", errors="replace") as pf:
-                                    pf.seek(last_pos[0])
-                                    lines = pf.readlines()
-                                    last_pos[0] = pf.tell()
-                                    for l in lines:
-                                        apply_progress_line(l)
-                            except Exception:
-                                pass
-                        stop_monitor.wait(0.05)
-
-                monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
-                monitor_thread.start()
+                monitor = _JobProgressMonitor(tasks, progress_path, on_status_change)
+                monitor.start()
 
             executor = JobExecutor(verbose=verbose)
-
-            if sys.platform == "win32":
-                run_cmd = f'"{temp_script_path.resolve()}"'
-            else:
-                run_cmd = f'sh "{temp_script_path.resolve()}"'
-
-            if job.command_timeout_minutes is not None:
-                timeout_sec = job.command_timeout_minutes * 60
-            else:
-                timeout_sec = None
+            run_cmd = f'"{temp_script_path.resolve()}"' if is_win else f'sh "{temp_script_path.resolve()}"'
+            timeout_sec = job.command_timeout_minutes * 60 if job.command_timeout_minutes is not None else None
 
             result = executor.run_command(
                 run_cmd,
@@ -588,53 +682,21 @@ def _execute_job_attempt(
                 timeout=timeout_sec,
             )
 
-            if monitor_thread:
-                stop_monitor.set()
-                monitor_thread.join(timeout=1.0)
-                if progress_path and progress_path.is_file():
-                    try:
-                        with open(progress_path, "r", encoding="utf-8", errors="replace") as pf:
-                            pf.seek(last_pos[0])
-                            for l in pf:
-                                apply_progress_line(l)
-                    except Exception:
-                        pass
+            if monitor:
+                monitor.stop_and_drain()
 
             if not result.success:
-                if tasks:
-                    for idx, t in enumerate(tasks):
-                        if t.status == BuildStatus.RUNNING:
-                            t.status = BuildStatus.FAILED
-                            t.exit_code = result.exit_code if result.exit_code is not None else 1
-                            if idx in task_start_times:
-                                t.duration = round(time.perf_counter() - task_start_times[idx], 4)
-                    if not any(t.status == BuildStatus.FAILED for t in tasks):
-                        for idx, t in enumerate(tasks):
-                            if t.status != BuildStatus.DONE:
-                                t.status = BuildStatus.FAILED
-                                t.exit_code = result.exit_code if result.exit_code is not None else 1
-                                if idx in task_start_times:
-                                    t.duration = round(time.perf_counter() - task_start_times[idx], 4)
-                                break
-                    if on_status_change:
-                        on_status_change()
+                if tasks and monitor:
+                    _reconcile_attempt_failure(tasks, result.exit_code, monitor.task_start_times, on_status_change)
 
-                if attempt < total_attempts:
-                    status_label = "ATTEMPT FAILED"
-                else:
-                    status_label = "FAILED"
+                status_label = "ATTEMPT FAILED" if attempt < total_attempts else "FAILED"
                 phase_label = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
                 if result.error_message:
-                    log_to_job(
-                        f"Process execution error: {result.error_message}")
-                    log_to_session(f"Job {job.name}{phase_label}: {status_label} "
-                                   f"(Command failed: {result.error_message})")
+                    log_to_job(f"Process execution error: {result.error_message}")
+                    log_to_session(f"Job {job.name}{phase_label}: {status_label} (Command failed: {result.error_message})")
                 else:
-                    log_to_job(
-                        f"Command failed with exit code {result.exit_code}")
-                    log_to_session(f"Job {job.name}{phase_label}: {status_label} "
-                                   f"(Command failed with exit code "
-                                   f"{result.exit_code})")
+                    log_to_job(f"Command failed with exit code {result.exit_code}")
+                    log_to_session(f"Job {job.name}{phase_label}: {status_label} (Command failed with exit code {result.exit_code})")
                 job_success = False
             else:
                 log_to_job("Command succeeded")
@@ -780,6 +842,176 @@ def _build_summary_text(
     return summary_text, duration_str, passed_count, failed_count, skipped_count
 
 
+def _resolve_execution_filters(
+    config: Config,
+    job_filter: list[str] | str | None,
+    phase_filter: list[str] | str | None,
+) -> tuple[set[str], list[str]]:
+    """Validates job and phase filters and resolves (jobs_to_run, phases_to_run)."""
+    if job_filter is None:
+        filter_list = []
+    elif isinstance(job_filter, str):
+        filter_list = [job_filter]
+    else:
+        filter_list = list(job_filter)
+
+    if filter_list:
+        filter_set = set(filter_list)
+        existing_names = {job.name for job in config.jobs}
+        invalid_names = filter_set - existing_names
+        if invalid_names:
+            raise ValueError(
+                f"Job filter contains invalid job names: {', '.join(sorted(invalid_names))}"
+            )
+        jobs_to_run = {job.name for job in config.jobs if job.name in filter_set}
+    else:
+        jobs_to_run = {job.name for job in config.jobs}
+
+    if phase_filter is None:
+        p_filter_list = []
+    elif isinstance(phase_filter, str):
+        p_filter_list = [phase_filter]
+    else:
+        p_filter_list = list(phase_filter)
+
+    all_defined_phases = []
+    for j in config.jobs:
+        for p_name in j.phases.keys():
+            if p_name not in all_defined_phases:
+                all_defined_phases.append(p_name)
+
+    if p_filter_list:
+        p_filter_set = set(p_filter_list)
+        invalid_phases = p_filter_set - set(all_defined_phases)
+        if invalid_phases:
+            raise ValueError(
+                f"Phase filter contains invalid phase names: {', '.join(sorted(invalid_phases))}"
+            )
+        phases_to_run = [p for p in all_defined_phases if p in p_filter_set]
+    else:
+        phases_to_run = all_defined_phases
+
+    return jobs_to_run, phases_to_run
+
+
+def _init_job_states(
+    config: Config,
+    jobs_to_run: set[str],
+    resume: str | None,
+    saved_summaries: dict,
+    succeeded_jobs: set[str],
+) -> tuple[dict, dict, dict, dict[str, list[CommandTask]]]:
+    """Initializes job summaries, durations, phase results, and command tasks."""
+    job_summaries = {}
+    job_durations = {}
+    job_phase_results = {}
+    job_command_tasks: dict[str, list[CommandTask]] = {}
+
+    for job in config.jobs:
+        default_tasks = build_job_command_tasks(job)
+        if resume == "latest":
+            job_info = saved_summaries.get(job.name, {})
+            saved_cmds = job_info.get("commands", [])
+            if saved_cmds:
+                job_command_tasks[job.name] = _restore_job_command_tasks(job, saved_cmds)
+            else:
+                if job.name in succeeded_jobs:
+                    for t in default_tasks:
+                        t.status = BuildStatus.DONE
+                job_command_tasks[job.name] = default_tasks
+
+            if job.name in succeeded_jobs:
+                job_summaries[job.name] = {
+                    "build_status": BuildStatus.DONE.value,
+                    "status": "SUCCESS",
+                    "duration": job_info.get("duration"),
+                    "commands": job_command_tasks[job.name],
+                    "cwd": job.cwd,
+                }
+            else:
+                b_status = compute_build_status(job_command_tasks[job.name], job.build_it)
+                st_val = "SUCCESS" if b_status == BuildStatus.DONE else b_status.value
+                if not job.build_it:
+                    st_val = "SKIPPED"
+                job_summaries[job.name] = {
+                    "build_status": b_status.value,
+                    "status": st_val,
+                    "duration": job_info.get("duration"),
+                    "commands": job_command_tasks[job.name],
+                    "cwd": job.cwd,
+                }
+        else:
+            job_command_tasks[job.name] = default_tasks
+            if not job.build_it:
+                for t in default_tasks:
+                    t.status = BuildStatus.SKIPPED
+            status_val = "PENDING" if (job.name in jobs_to_run and job.build_it) else "SKIPPED"
+            b_status_val = BuildStatus.PENDING.value if (job.name in jobs_to_run and job.build_it) else BuildStatus.SKIPPED.value
+            job_summaries[job.name] = {
+                "build_status": b_status_val,
+                "status": status_val,
+                "duration": None,
+                "commands": job_command_tasks[job.name],
+                "cwd": job.cwd,
+            }
+        job_durations[job.name] = (job_summaries[job.name]["duration"] or 0.0)
+        job_phase_results[job.name] = {}
+
+    return job_summaries, job_durations, job_phase_results, job_command_tasks
+
+
+def _build_execution_tasks(
+    config: Config,
+    jobs_to_run: set[str],
+    phases_to_run: list[str],
+    mode: str,
+) -> list[tuple[Job, str]]:
+    """Builds the ordered sequence of (job, phase_name) pairs to execute."""
+    execution_tasks: list[tuple[Job, str]] = []
+    if mode == "phased":
+        for p_name in phases_to_run:
+            for job in config.jobs:
+                if job.name in jobs_to_run and job.build_it and p_name in job.phases:
+                    execution_tasks.append((job, p_name))
+    else:
+        for job in config.jobs:
+            if job.name in jobs_to_run and job.build_it:
+                for p_name in phases_to_run:
+                    if p_name in job.phases:
+                        execution_tasks.append((job, p_name))
+    return execution_tasks
+
+
+def _update_job_phase_status(
+    job: Job,
+    phases_to_run: list[str],
+    job_phase_results: dict,
+    job_command_tasks: dict,
+    job_durations: dict,
+    job_summaries: dict,
+) -> None:
+    """Updates the summary and build status of a job based on its completed target phases."""
+    target_phases = [p for p in job.phases.keys() if p in phases_to_run]
+    all_target_succeeded = all(
+        job_phase_results[job.name].get(p) is True for p in target_phases
+    )
+    any_target_failed = any(
+        job_phase_results[job.name].get(p) is False for p in target_phases
+    )
+
+    if any_target_failed:
+        job_summaries[job.name]["build_status"] = BuildStatus.FAILED.value
+        job_summaries[job.name]["status"] = "FAILED"
+    elif all_target_succeeded and len(job_phase_results[job.name]) == len(target_phases):
+        job_summaries[job.name]["build_status"] = BuildStatus.DONE.value
+        job_summaries[job.name]["status"] = "SUCCESS"
+    else:
+        b_st = compute_build_status(job_command_tasks[job.name], job.build_it)
+        job_summaries[job.name]["build_status"] = b_st.value
+        job_summaries[job.name]["status"] = "SUCCESS" if b_st == BuildStatus.DONE else b_st.value
+    job_summaries[job.name]["duration"] = job_durations[job.name]
+
+
 class Scheduler:
     """Orchestrates execution of job queues, phase filtering, and logging."""
 
@@ -805,54 +1037,7 @@ class Scheduler:
         Raises ValueError if filters contain invalid job or phase names.
         """
         session_start_time = time.perf_counter()
-        # Normalize job_filter
-        if job_filter is None:
-            filter_list = []
-        elif isinstance(job_filter, str):
-            filter_list = [job_filter]
-        else:
-            filter_list = list(job_filter)
-
-        # Validate job_filter if present (before any filesystem operations)
-        if filter_list:
-            filter_set = set(filter_list)
-            existing_names = {job.name for job in config.jobs}
-            invalid_names = filter_set - existing_names
-            if invalid_names:
-                raise ValueError(
-                    f"Job filter contains invalid job names: {', '.join(sorted(invalid_names))}"
-                )
-            jobs_to_run = {
-                job.name
-                for job in config.jobs if job.name in filter_set
-            }
-        else:
-            jobs_to_run = {job.name for job in config.jobs}
-
-        # Normalize and validate phase_filter
-        if phase_filter is None:
-            p_filter_list = []
-        elif isinstance(phase_filter, str):
-            p_filter_list = [phase_filter]
-        else:
-            p_filter_list = list(phase_filter)
-
-        all_defined_phases = []
-        for j in config.jobs:
-            for p_name in j.phases.keys():
-                if p_name not in all_defined_phases:
-                    all_defined_phases.append(p_name)
-
-        if p_filter_list:
-            p_filter_set = set(p_filter_list)
-            invalid_phases = p_filter_set - set(all_defined_phases)
-            if invalid_phases:
-                raise ValueError(
-                    f"Phase filter contains invalid phase names: {', '.join(sorted(invalid_phases))}"
-                )
-            phases_to_run = [p for p in all_defined_phases if p in p_filter_set]
-        else:
-            phases_to_run = all_defined_phases
+        jobs_to_run, phases_to_run = _resolve_execution_filters(config, job_filter, phase_filter)
 
         # Resolve resume status if configured
         status_path = resolve_status_path(config.settings.log_dir, config_path)
@@ -911,79 +1096,15 @@ class Scheduler:
 
             session_log_path = log_dir / f"{session_date}_session.log"
 
-            # Reconstruct job summaries from state if resuming
-            job_summaries = {}
-            job_durations = {}
+            job_summaries, job_durations, job_phase_results, job_command_tasks = _init_job_states(
+                config=config,
+                jobs_to_run=jobs_to_run,
+                resume=resume,
+                saved_summaries=saved_summaries,
+                succeeded_jobs=succeeded_jobs,
+            )
+
             job_failed = {}
-            job_phase_results = {}
-            job_command_tasks: dict[str, list[CommandTask]] = {}
-
-            for job in config.jobs:
-                default_tasks = build_job_command_tasks(job)
-                if resume == "latest":
-                    job_info = saved_summaries.get(job.name, {})
-                    saved_cmds = job_info.get("commands", [])
-                    if saved_cmds:
-                        restored_tasks = []
-                        for t in default_tasks:
-                            matching = next(
-                                (c for c in saved_cmds
-                                 if isinstance(c, dict) and (c.get("index") == t.index or (c.get("command") == t.command and c.get("phase") == t.phase))),
-                                None,
-                            )
-                            if matching:
-                                raw_st = matching.get("status", BuildStatus.PENDING.value)
-                                try:
-                                    t.status = BuildStatus(raw_st)
-                                except ValueError:
-                                    t.status = BuildStatus.PENDING
-                                t.exit_code = matching.get("exit_code")
-                                t.duration = matching.get("duration")
-                            restored_tasks.append(t)
-                        job_command_tasks[job.name] = restored_tasks
-                    else:
-                        if job.name in succeeded_jobs:
-                            for t in default_tasks:
-                                t.status = BuildStatus.DONE
-                        job_command_tasks[job.name] = default_tasks
-
-                    if job.name in succeeded_jobs:
-                        job_summaries[job.name] = {
-                            "build_status": BuildStatus.DONE.value,
-                            "status": "SUCCESS",
-                            "duration": job_info.get("duration"),
-                            "commands": job_command_tasks[job.name],
-                            "cwd": job.cwd,
-                        }
-                    else:
-                        b_status = compute_build_status(job_command_tasks[job.name], job.build_it)
-                        st_val = "SUCCESS" if b_status == BuildStatus.DONE else b_status.value
-                        if not job.build_it:
-                            st_val = "SKIPPED"
-                        job_summaries[job.name] = {
-                            "build_status": b_status.value,
-                            "status": st_val,
-                            "duration": job_info.get("duration"),
-                            "commands": job_command_tasks[job.name],
-                            "cwd": job.cwd,
-                        }
-                else:
-                    job_command_tasks[job.name] = default_tasks
-                    if not job.build_it:
-                        for t in default_tasks:
-                            t.status = BuildStatus.SKIPPED
-                    status_val = "PENDING" if (job.name in jobs_to_run and job.build_it) else "SKIPPED"
-                    b_status_val = BuildStatus.PENDING.value if (job.name in jobs_to_run and job.build_it) else BuildStatus.SKIPPED.value
-                    job_summaries[job.name] = {
-                        "build_status": b_status_val,
-                        "status": status_val,
-                        "duration": None,
-                        "commands": job_command_tasks[job.name],
-                        "cwd": job.cwd,
-                    }
-                job_durations[job.name] = (job_summaries[job.name]["duration"] or 0.0)
-                job_phase_results[job.name] = {}
-
             overall_success = True
             aborted = False
 
@@ -1016,19 +1137,7 @@ class Scheduler:
                 if job.name in jobs_to_run and not job.build_it:
                     log_to_session(f"Job {job.name} is disabled. Skipping.")
 
-            # Build execution sequence of (job, phase_name) tuples based on mode
-            execution_tasks: list[tuple[Job, str]] = []
-            if mode == "phased":
-                for p_name in phases_to_run:
-                    for job in config.jobs:
-                        if job.name in jobs_to_run and job.build_it and p_name in job.phases:
-                            execution_tasks.append((job, p_name))
-            else:
-                for job in config.jobs:
-                    if job.name in jobs_to_run and job.build_it:
-                        for p_name in phases_to_run:
-                            if p_name in job.phases:
-                                execution_tasks.append((job, p_name))
+            execution_tasks = _build_execution_tasks(config, jobs_to_run, phases_to_run, mode)
 
             current_phase_header = None
             for job, phase_name in execution_tasks:
@@ -1109,29 +1218,14 @@ class Scheduler:
                         )
                         aborted = True
 
-                # Update job_summaries state for completed phases
-                target_phases = [p for p in job.phases.keys() if p in phases_to_run]
-                all_target_succeeded = all(
-                    job_phase_results[job.name].get(p) is True for p in target_phases
+                _update_job_phase_status(
+                    job=job,
+                    phases_to_run=phases_to_run,
+                    job_phase_results=job_phase_results,
+                    job_command_tasks=job_command_tasks,
+                    job_durations=job_durations,
+                    job_summaries=job_summaries,
                 )
-                any_target_failed = any(
-                    job_phase_results[job.name].get(p) is False for p in target_phases
-                )
-
-                if any_target_failed:
-                    job_summaries[job.name]["build_status"] = BuildStatus.FAILED.value
-                    job_summaries[job.name]["status"] = "FAILED"
-                    job_summaries[job.name]["duration"] = job_durations[job.name]
-                elif all_target_succeeded and len(job_phase_results[job.name]) == len(target_phases):
-                    job_summaries[job.name]["build_status"] = BuildStatus.DONE.value
-                    job_summaries[job.name]["status"] = "SUCCESS"
-                    job_summaries[job.name]["duration"] = job_durations[job.name]
-                else:
-                    b_st = compute_build_status(job_command_tasks[job.name], job.build_it)
-                    job_summaries[job.name]["build_status"] = b_st.value
-                    job_summaries[job.name]["status"] = "SUCCESS" if b_st == BuildStatus.DONE else b_st.value
-                    job_summaries[job.name]["duration"] = job_durations[job.name]
-
                 _save_status(status_path, config_path, session_date, job_summaries)
 
             elapsed_time = time.perf_counter() - session_start_time
