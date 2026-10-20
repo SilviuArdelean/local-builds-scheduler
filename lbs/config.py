@@ -6,6 +6,7 @@ lbs.config – Configuration loader and validator.
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
 import math
 import os
 from pathlib import Path
@@ -17,6 +18,29 @@ import yaml
 class ConfigError(Exception):
     """Exception raised when configuration loading or validation fails."""
     pass
+
+
+class BuildStatus(str, Enum):
+    """Execution status for a build target or individual command."""
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    FAILED = "FAILED"
+    DONE = "DONE"
+    SKIPPED = "SKIPPED"
+
+
+def resolve_status_path(
+    log_dir: str | Path,
+    config_file: str | Path | None = None,
+) -> Path:
+    """Resolves profile-scoped status file path: logs/lbs_status_<config_stem>.json.
+    Falls back to logs/lbs_status.json if config_file is not specified.
+    """
+    log_path = Path(log_dir)
+    if config_file is not None and str(config_file).strip():
+        stem = Path(config_file).stem
+        return log_path / f"lbs_status_{stem}.json"
+    return log_path / "lbs_status.json"
 
 
 @dataclass

@@ -246,3 +246,113 @@ def test_dry_run_with_disabled_job(tmp_path):
     assert "CWD: " not in job_b_block
     assert "Environment: " not in job_b_block
     assert "Commands:" not in job_b_block
+
+
+def test_dry_run_resume_command_level_details(tmp_path, capsys):
+    """Verify that --dry-run with --resume displays command-level [DONE], [RESUME], [PENDING] tags."""
+    import json
+    from lbs.config import Config, Job, Settings
+    from lbs.runner import Scheduler
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    status_file = log_dir / "lbs_status_build-test.json"
+
+    status_data = {
+        "config_file": "configs/build-test.yaml",
+        "session_date": "2026-10-20",
+        "jobs": {
+            "job-multi": {
+                "build_status": "FAILED",
+                "status": "FAILED",
+                "commands": [
+                    {"index": 0, "command": "echo step1", "status": "DONE", "duration": 1.25},
+                    {"index": 1, "command": "echo step2", "status": "FAILED", "duration": 0.45},
+                    {"index": 2, "command": "echo step3", "status": "PENDING", "duration": None},
+                ],
+            }
+        },
+    }
+    with open(status_file, "w", encoding="utf-8") as f:
+        json.dump(status_data, f)
+
+    settings = Settings(log_dir=str(log_dir))
+    job = Job(
+        name="job-multi",
+        cwd=str(tmp_path),
+        commands=["echo step1", "echo step2", "echo step3"],
+    )
+    config = Config(settings=settings, jobs=[job])
+
+    success = Scheduler.run(
+        config,
+        dry_run=True,
+        resume="latest",
+        config_path="configs/build-test.yaml",
+    )
+    assert success is True
+
+    captured = capsys.readouterr()
+    assert "Dry-Run Execution Plan" in captured.out
+    assert "Resuming Session from latest state (lbs_status_build-test.json)" in captured.out
+    assert "Job: job-multi [RESUMING - 1 of 3 commands completed]" in captured.out
+    assert "[DONE]    echo step1 (took 1.2s)" in captured.out
+    assert "[RESUME]  echo step2" in captured.out
+    assert "[PENDING] echo step3" in captured.out
+
+
+def test_dry_run_resume_phased_commands(tmp_path, capsys):
+    """Verify that phased jobs display phase tags and command statuses in dry-run resume."""
+    import json
+    from lbs.config import Config, Job, Settings
+    from lbs.runner import Scheduler
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    status_file = log_dir / "lbs_status_phased-test.json"
+
+    status_data = {
+        "config_file": "configs/phased-test.yaml",
+        "session_date": "2026-10-20",
+        "jobs": {
+            "job-phased": {
+                "build_status": "FAILED",
+                "status": "FAILED",
+                "commands": [
+                    {"index": 0, "phase": "sync", "command": "fetch_deps.sh", "status": "DONE", "duration": 14.2},
+                    {"index": 1, "phase": "sync", "command": "setup_env.sh", "status": "DONE", "duration": 1.1},
+                    {"index": 2, "phase": "build", "command": "compile.py", "status": "FAILED", "duration": 5.0},
+                    {"index": 3, "phase": "build", "command": "package.py", "status": "PENDING", "duration": None},
+                ],
+            }
+        },
+    }
+    with open(status_file, "w", encoding="utf-8") as f:
+        json.dump(status_data, f)
+
+    settings = Settings(log_dir=str(log_dir))
+    job = Job(
+        name="job-phased",
+        cwd=str(tmp_path),
+        commands=[],
+        phases={
+            "sync": ["fetch_deps.sh", "setup_env.sh"],
+            "build": ["compile.py", "package.py"],
+        },
+    )
+    config = Config(settings=settings, jobs=[job])
+
+    success = Scheduler.run(
+        config,
+        dry_run=True,
+        resume="latest",
+        config_path="configs/phased-test.yaml",
+    )
+    assert success is True
+
+    captured = capsys.readouterr()
+    assert "Job: job-phased [RESUMING - 2 of 4 commands completed]" in captured.out
+    assert "[DONE]    (sync)  fetch_deps.sh (took 14.2s)" in captured.out
+    assert "[DONE]    (sync)  setup_env.sh (took 1.1s)" in captured.out
+    assert "[RESUME]  (build)  compile.py" in captured.out
+    assert "[PENDING] (build)  package.py" in captured.out
