@@ -651,3 +651,39 @@ def test_command_duration_preserved_accurately(tmp_path):
     assert commands[1]["duration"] is not None
     assert commands[1][
         "duration"] >= 0.08, f"Expected duration >= 0.08s, got {commands[1]['duration']}s"
+
+
+def test_scheduler_keyboard_interrupt_graceful_handling(tmp_path, capsys):
+    """Ticket 1: Verify graceful state capture and messaging when KeyboardInterrupt occurs."""
+    from unittest.mock import patch
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    config_path = "configs/test-interrupt.yaml"
+
+    py_pass = f'"{sys.executable}" -c "print(1)"'
+    jobs = [
+        Job(name="job-1", cwd=str(tmp_path), commands=[py_pass]),
+        Job(name="job-2", cwd=str(tmp_path), commands=[py_pass]),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    with patch("lbs.runner._run_single_job", side_effect=KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            Scheduler.run(config, config_path=config_path)
+
+    captured = capsys.readouterr()
+    assert "[LBS] Run interrupted by user (Ctrl+C)" in captured.err
+    assert "To resume, run: lbs run configs/test-interrupt.yaml --resume latest" in captured.err
+
+    status_file = log_dir / "lbs_status_test-interrupt.json"
+    assert status_file.is_file()
+
+    with open(status_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    jobs_data = data["jobs"]
+    assert jobs_data["job-1"]["status"] == "INTERRUPTED"
+    assert jobs_data["job-1"]["build_status"] == "FAILED"
+    assert jobs_data["job-2"]["status"] == "SKIPPED"
+    assert jobs_data["job-2"]["build_status"] == "SKIPPED"
+
