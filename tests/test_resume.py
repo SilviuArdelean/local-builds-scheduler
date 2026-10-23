@@ -687,3 +687,41 @@ def test_scheduler_keyboard_interrupt_graceful_handling(tmp_path, capsys):
     assert jobs_data["job-2"]["status"] == "SKIPPED"
     assert jobs_data["job-2"]["build_status"] == "SKIPPED"
 
+
+def test_status_file_synced_on_stop_on_failure(tmp_path):
+    """Ticket 2: Verify that when stop_on_failure halts run, the status JSON on disk has SKIPPED."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    config_path = "configs/test-stop-failure.yaml"
+
+    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+    py_pass = f'"{sys.executable}" -c "print(1)"'
+
+    jobs = [
+        Job(name="job-1", cwd=str(tmp_path), commands=[py_pass]),
+        Job(name="job-2", cwd=str(tmp_path), commands=[py_fail]),
+        Job(name="job-3", cwd=str(tmp_path), commands=[py_pass, py_pass]),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, config_path=config_path)
+    assert success is False
+
+    status_file = log_dir / "lbs_status_test-stop-failure.json"
+    assert status_file.is_file()
+
+    with open(status_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    jobs_data = data["jobs"]
+    assert jobs_data["job-1"]["status"] == "SUCCESS"
+    assert jobs_data["job-1"]["build_status"] == "DONE"
+
+    assert jobs_data["job-2"]["status"] == "FAILED"
+    assert jobs_data["job-2"]["build_status"] == "FAILED"
+
+    assert jobs_data["job-3"]["status"] == "SKIPPED"
+    assert jobs_data["job-3"]["build_status"] == "SKIPPED"
+    assert len(jobs_data["job-3"]["commands"]) == 2
+    for cmd in jobs_data["job-3"]["commands"]:
+        assert cmd["status"] == "SKIPPED"
