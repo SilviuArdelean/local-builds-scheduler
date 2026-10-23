@@ -1241,6 +1241,9 @@ class Scheduler:
                     )
                     _save_status(status_path, config_path, session_date, job_summaries)
 
+                # Unconditional save to disk after execution tasks complete
+                _save_status(status_path, config_path, session_date, job_summaries)
+
             except KeyboardInterrupt:
                 log_to_session("--- Session interrupted by user (Ctrl+C) ---")
                 overall_success = False
