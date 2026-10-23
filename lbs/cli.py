@@ -93,6 +93,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     except LockError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -217,4 +219,7 @@ def main() -> None:
     """Main entry point for the lbs CLI."""
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.exit(130)
