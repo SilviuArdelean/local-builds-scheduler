@@ -139,3 +139,47 @@ def test_executor_shell_false(tmp_path):
     assert result.success is True
     assert result.exit_code == 0
     assert "no-shell-worked" in log_file.getvalue()
+
+
+def test_executor_keyboard_interrupt_handling(tmp_path):
+    """Verify that KeyboardInterrupt triggers process tree termination and raises."""
+    import pytest
+    executor = JobExecutor(verbose=False)
+    log_file = io.StringIO()
+
+    py_cmd = f'"{sys.executable}" -c "import time; time.sleep(10)"'
+
+    with patch("lbs.utils.executor._terminate_process") as mock_terminate:
+        with patch("queue.Queue.get", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                executor.run_command(
+                    py_cmd,
+                    cwd=str(tmp_path),
+                    log_file=log_file,
+                )
+        assert mock_terminate.called
+
+
+def test_terminate_process_tree_calls():
+    """Verify _terminate_process invokes platform-appropriate termination."""
+    from unittest.mock import MagicMock
+    from lbs.utils.executor import _terminate_process
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    mock_proc.pid = 99999
+
+    if sys.platform == "win32":
+        with patch("subprocess.run") as mock_subrun, patch("os.kill") as mock_kill:
+            _terminate_process(mock_proc)
+            assert mock_kill.called
+            assert mock_subrun.called
+            called_cmd = mock_subrun.call_args[0][0]
+            assert "taskkill" in called_cmd
+            assert "/F" in called_cmd
+            assert "/T" in called_cmd
+    else:
+        with patch("os.killpg") as mock_killpg, patch("os.getpgid", return_value=12345):
+            _terminate_process(mock_proc)
+            assert mock_killpg.called
+

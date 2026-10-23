@@ -356,3 +356,4 @@ def test_dry_run_resume_phased_commands(tmp_path, capsys):
     assert "[DONE]    (sync)  setup_env.sh (took 1.1s)" in captured.out
     assert "[RESUME]  (build)  compile.py" in captured.out
     assert "[PENDING] (build)  package.py" in captured.out
+

@@ -18,10 +18,24 @@ import time
 
 
 def _terminate_process(process: subprocess.Popen) -> None:
-    """Safely terminates a process group or session in a platform-sensitive manner."""
+    """Safely and recursively terminates an entire process tree across platforms."""
+    if process.poll() is not None:
+        return
+
     if sys.platform == "win32":
+        # 1. Send break event first to allow cooperative cleanup
         try:
             os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+        except Exception:
+            pass
+        # 2. Forcefully kill the entire process tree via taskkill
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         except Exception:
             try:
                 process.kill()
@@ -29,7 +43,11 @@ def _terminate_process(process: subprocess.Popen) -> None:
                 pass
     else:
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            time.sleep(0.1)
+            if process.poll() is None:
+                os.killpg(pgid, signal.SIGKILL)
         except Exception:
             try:
                 process.kill()
@@ -92,6 +110,7 @@ class JobExecutor:
         exit_code = None
         success = False
         error_message = None
+        process: subprocess.Popen | None = None
 
         try:
             if not os.path.isdir(cwd):
@@ -239,6 +258,18 @@ class JobExecutor:
                     process.wait()
                     exit_code = process.returncode
                     success = (exit_code == 0)
+
+        except KeyboardInterrupt:
+            if process is not None:
+                _terminate_process(process)
+                try:
+                    process.wait(timeout=2.0)
+                except Exception:
+                    pass
+            exit_code = 130
+            success = False
+            error_message = "Interrupted by user (Ctrl+C)"
+            raise
 
         except FileNotFoundError as e:
             error_message = str(e)
