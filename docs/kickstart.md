@@ -181,7 +181,7 @@ lbs run my-build-config.yaml -j compile-project --verbose
   lbs run my-build-config.yaml --resume latest --verbose
   ```
   **Resume is per-job, not per-command.** LBS skips any job whose *previous* status was `SUCCESS`,
-  but a job that `FAILED`, was `PENDING`, or `SKIPPED` is re-run **from its very first command**,
+  but a job that `FAILED`, was `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED` is re-run **from its very first command**,
   every time — there is no mid-job checkpoint. If a failing job's command list starts with
   destructive/expensive setup steps (e.g. `git reset --hard`, `git clean -xffd`, a full dependency
   sync), every resume attempt redoes that setup from scratch before it even gets back to the point
