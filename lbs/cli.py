@@ -8,11 +8,12 @@ Entry point: lbs.cli:main
 """
 
 import argparse
+import json
 import subprocess
 import sys
 
 from lbs import __version__, Scheduler
-from lbs.config import load_config, ConfigError
+from lbs.config import load_config, resolve_status_path, Config, ConfigError
 from lbs.utils.lock import LockError
 
 
@@ -47,6 +48,51 @@ def trigger_os_shutdown() -> None:
         print(f"Failed to initiate system shutdown: {e}", file=sys.stderr)
 
 
+def _count_unfinished_enabled_jobs(config: Config, config_path: str) -> int | None:
+    """Counts enabled jobs whose persisted status is not SUCCESS.
+
+    Returns None if the status file cannot be read, so callers can stay safe.
+    """
+    status_path = resolve_status_path(config.settings.log_dir, config_path)
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            saved_jobs = json.load(f).get("jobs", {})
+    except (OSError, ValueError, AttributeError):
+        return None
+
+    unfinished = 0
+    for job in config.jobs:
+        if not job.build_it:
+            continue
+        info = saved_jobs.get(job.name)
+        if not isinstance(info, dict) or info.get("status") != "SUCCESS":
+            unfinished += 1
+    return unfinished
+
+
+def _should_trigger_shutdown(config: Config, config_path: str) -> bool:
+    """Returns True only if all enabled jobs completed; otherwise warns on stderr."""
+    unfinished = _count_unfinished_enabled_jobs(config, config_path)
+    if unfinished is None:
+        print(
+            "[WARNING] System shutdown cancelled: could not verify the "
+            "status of all jobs in the configuration.",
+            file=sys.stderr,
+        )
+        return False
+    if unfinished > 0:
+        noun = "job" if unfinished == 1 else "jobs"
+        verb = "remains" if unfinished == 1 else "remain"
+        print(
+            f"[WARNING] System shutdown cancelled: {unfinished} {noun} in the "
+            f"configuration {verb} unexecuted or skipped.\n"
+            "To power off only after all jobs finish, run without job filters.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """Handle the 'lbs run <config>' subcommand."""
     try:
@@ -78,7 +124,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     "the machine stays available for diagnosis.",
                     file=sys.stderr,
                 )
-            else:
+            elif _should_trigger_shutdown(config, args.config):
                 trigger_os_shutdown()
         sys.exit(0 if success else 1)
     except ConfigError as e:
@@ -156,7 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--shutdown",
         action="store_true",
         help="Shut down the system after all jobs complete successfully. "
-        "Skipped if any job fails, and on --dry-run.",
+        "Skipped if any job fails, if any enabled job in the config remains "
+        "unexecuted or skipped (e.g. with -j), and on --dry-run.",
     )
     run_parser.add_argument(
         "-q",
