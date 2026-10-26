@@ -954,4 +954,4 @@ def test_config_hash_computation_and_persistence(tmp_path):
         status_data = json.load(f)
 
     assert status_data["config_hash"] == hash1
-    assert "config_hash" in status_data["jobs"]["job-a"]
+    assert "config_hash" not in status_data["jobs"]["job-a"]

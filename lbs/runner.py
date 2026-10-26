@@ -139,27 +139,7 @@ def _canonicalize_job_config(job: Job) -> dict:
     }
 
 
-def _canonicalize_summary_entry(name: str, info: dict) -> dict | None:
-    """Extracts a canonical dictionary representation of a saved job summary."""
-    if not isinstance(info, dict):
-        return None
-    cmds = []
-    for c in info.get("commands", []):
-        if isinstance(c, CommandTask):
-            cmds.append({"phase": c.phase, "command": c.command})
-        elif isinstance(c, dict):
-            cmds.append({
-                "phase": c.get("phase", "default"),
-                "command": c.get("command", ""),
-            })
-    return {
-        "name": name,
-        "cwd": str(info.get("cwd", "")),
-        "commands": cmds,
-    }
-
-
-def compute_config_hash(target: Config | list[Job] | dict | None) -> str:
+def compute_config_hash(target: Config | list[Job] | None) -> str:
     """Computes a deterministic SHA-256 hash of job configurations (names, cwds,
     phases/commands, env, and build_it flags) to detect configuration drift.
     """
@@ -170,12 +150,6 @@ def compute_config_hash(target: Config | list[Job] | dict | None) -> str:
         canonical_jobs = [_canonicalize_job_config(j) for j in target.jobs]
     elif isinstance(target, list):
         canonical_jobs = [_canonicalize_job_config(j) for j in target]
-    elif isinstance(target, dict):
-        entries = (
-            _canonicalize_summary_entry(name, target[name])
-            for name in sorted(target.keys())
-        )
-        canonical_jobs = [e for e in entries if e is not None]
     else:
         return ""
 
@@ -216,17 +190,6 @@ def _resolve_job_build_status(info: dict, raw_commands: list) -> str:
     return BuildStatus.PENDING.value
 
 
-def _compute_commands_hash(serialized_commands: list[dict]) -> str:
-    """Computes a SHA-256 digest of serialized command items for a job."""
-    cmd_repr = [
-        {"phase": c.get("phase", "default"), "command": c.get("command", "")}
-        for c in serialized_commands
-        if isinstance(c, dict)
-    ]
-    raw_bytes = json.dumps(cmd_repr, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(raw_bytes).hexdigest()
-
-
 def _serialize_job_summary(info: dict) -> dict:
     """Serializes a single job summary dictionary for status persistence."""
     raw_commands = info.get("commands", [])
@@ -245,7 +208,6 @@ def _serialize_job_summary(info: dict) -> dict:
     }
     if serialized_commands:
         job_record["commands"] = serialized_commands
-        job_record["config_hash"] = _compute_commands_hash(serialized_commands)
     if "cwd" in info:
         job_record["cwd"] = info["cwd"]
 
@@ -264,9 +226,6 @@ def _save_status(
         name: _serialize_job_summary(info)
         for name, info in job_summaries.items()
     }
-
-    if config_hash is None:
-        config_hash = compute_config_hash(job_summaries)
 
     data = {
         "config_file": str(config_file) if config_file is not None else None,
