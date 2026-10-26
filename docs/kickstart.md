@@ -158,9 +158,14 @@ lbs run my-build-config.yaml --dry-run
 Ensure the target jobs are active and disabled jobs are marked `[DISABLED]`.
 
 ### 3. Run the Execution
-Kick off the sequential execution:
+Kick off execution (live compiler streaming in the top 75% of your terminal and a pinned status dashboard in the bottom 25% are enabled by default):
 ```bash
-lbs run my-build-config.yaml --verbose
+lbs run my-build-config.yaml
+```
+
+To run in quiet mode with a compact, single-line progress bar instead of full compiler streaming:
+```bash
+lbs run my-build-config.yaml -q
 ```
 
 List job names first if you just want a quick sanity check of what's defined and in what order:
@@ -170,21 +175,15 @@ lbs list my-build-config.yaml
 
 To re-run (or debug) only one job without touching the rest of the queue, filter with `-j`:
 ```bash
-lbs run my-build-config.yaml -j compile-project --verbose
+lbs run my-build-config.yaml -j compile-project
 ```
 
 ### 4. Monitor & Recover
+* **Live Dashboard**: The pinned console dashboard shows real-time progress percentage, active job and phase, running command, elapsed duration, and queue counts.
 * **Logs**: Check `./logs/` for `<date>_session.log` and `<date>_<job-name>.log`.
-* **State**: LBS writes execution progress to `logs/lbs_state.json`.
-* **Resuming**: If a job fails, resolve the issue in your target build, then resume with `--resume latest`:
+* **State**: LBS saves granular execution progress to `logs/lbs_status_<config>.json` (and `logs/lbs_state.json`).
+* **Resuming**: If a job fails or is interrupted, resolve the issue, then resume with `--resume latest`:
   ```bash
-  lbs run my-build-config.yaml --resume latest --verbose
+  lbs run my-build-config.yaml --resume latest
   ```
-  **Resume is per-job, not per-command.** LBS skips any job whose *previous* status was `SUCCESS`,
-  but a job that `FAILED`, was `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED` is re-run **from its very first command**,
-  every time — there is no mid-job checkpoint. If a failing job's command list starts with
-  destructive/expensive setup steps (e.g. `git reset --hard`, `git clean -xffd`, a full dependency
-  sync), every resume attempt redoes that setup from scratch before it even gets back to the point
-  that failed. If you want resumes to be cheap, split such a job into two: one job for the
-  destructive/expensive setup, another for the actual build — a resume then only re-runs the
-  build job once setup has succeeded once.
+  **Granular Resumption**: LBS skips jobs that already completed with `SUCCESS`. For jobs that were `FAILED`, `PARTIAL`, `ABORTED`, or `INTERRUPTED`, LBS matches commands against the saved status profile and **skips commands that already succeeded (`DONE`)**, resuming execution immediately from the first incomplete command.

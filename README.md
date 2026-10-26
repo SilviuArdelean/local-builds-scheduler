@@ -23,6 +23,7 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 - **Concurrency Prevention**: Uses native, cross-platform file locking (`lbs.lock`) in the log directory to ensure only one instance runs at a time.
 - **Session Resuming**: Save state automatically, allowing you to resume interrupted sessions from incomplete (failed, partial, aborted, or skipped) jobs using `--resume latest`.
 - **Dry-Run Mode**: Validate and view the full planned execution details (including paths, environment variables, commands, retries, and timeouts) without running any commands.
+- **Split-Screen Live Dashboard**: By default on interactive terminals, splits the console into a live scrolling compiler viewport (top ~75%) and a pinned real-time status dashboard (bottom ~25%) with progress bar, active commands, queue counts, elapsed time, and dynamic terminal window tab title updates.
 - **Secure Credentials**: Separate notification files (`notifications.yaml`) and support environment variable interpolation (e.g., `${SMTP_PASSWORD}`) to avoid committing secrets to source control.
 
 ---
@@ -107,7 +108,7 @@ jobs:
 | :--- | :--- | :--- | :--- |
 | `log_dir` | `string` | `"logs"` | Directory path where session and job logs are written. Can be absolute or relative. |
 | `stop_on_failure` | `boolean` | `false` | If `true`, aborts the remaining jobs in the queue immediately if any job fails. |
-| `verbose` | `boolean` | `false` | If `true`, mirrors all command outputs (stdout/stderr) directly to standard output in real-time. |
+| `verbose` | `boolean` | `true` | If `true` (default), mirrors command outputs directly to standard output in real-time. Can be silenced with `-q` / `--quiet`. |
 | `notifications` | `object` | *(Optional)* | Configuration for sending status notifications. (See details below). |
 
 ##### Settings Notifications Schema (`settings.notifications`)
@@ -153,8 +154,8 @@ The global entry point is `lbs`. It provides several subcommands.
 
 | Use Case / Goal | Command Invocations | Description & Behavior |
 | :--- | :--- | :--- |
-| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially, streaming live command output to the console. |
-| **Quiet Run** | `lbs run config.yaml -q` | Suppresses live command output streaming to the terminal (silent mode); logs are still saved to disk and the summary table is displayed. |
+| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially with a live 75%/25% split-screen console (streaming live compiler output in the top 75% and pinning real-time queue progress in the bottom 25%). |
+| **Quiet Run** | `lbs run config.yaml -q` | Suppresses live compiler output streaming to the terminal and renders an in-place updating single-line progress bar; logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
 | **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
@@ -181,7 +182,7 @@ lbs run <config-path> [options]
 ```
 
 **Options:**
-* `-q`, `--quiet` — Suppress live command execution output from being streamed to the console (full logs are still recorded to disk under `log_dir`, and the final summary table is still printed).
+* `-q`, `--quiet` — Suppress live command execution output from being streamed to the console and display an in-place updating single-line progress bar (full logs are still recorded to disk under `log_dir`, and the final summary table is still printed).
 * `-j <job-name>`, `--job <job-name>` — Filter to run *only* the specified job. Can be specified multiple times (e.g. `lbs run config.yaml -j compile -j test`).
 * `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
 * `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the incomplete (failed, partial, aborted, or skipped) jobs.
@@ -225,16 +226,16 @@ To prevent multiple scheduler instances from writing to the same logs or executi
 
 ### Session Resuming (`--resume latest`)
 
-LBS automatically tracks execution progress inside a `lbs_state.json` file created inside the `log_dir`. 
+LBS automatically tracks granular execution progress inside a `lbs_status_<config>.json` file (with `lbs_state.json` fallback) created inside the `log_dir`. 
 
 If a build fails, or the scheduler is interrupted (e.g., `Ctrl+C`), you can rerun the exact same command adding the `--resume latest` flag:
 ```bash
 lbs run config.yaml --resume latest
 ```
-This reads `lbs_state.json` and:
-1. Reconstructs the status of all jobs from the session.
+This reads the saved status file and:
+1. Reconstructs the status of all jobs and individual commands from the previous session.
 2. Skips all jobs that have already completed with a `SUCCESS` status.
-3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED`) jobs.
+3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
 4. If all selected jobs had already succeeded, it outputs a status message and exits immediately.
 
 ---

@@ -474,8 +474,14 @@ def test_compute_build_status():
     assert compute_build_status([], job_build_it=True) == BuildStatus.DONE
 
     # 3. All pending
-    t0 = CommandTask(index=0, phase="build", command="cmd0", status=BuildStatus.PENDING)
-    t1 = CommandTask(index=1, phase="build", command="cmd1", status=BuildStatus.PENDING)
+    t0 = CommandTask(index=0,
+                     phase="build",
+                     command="cmd0",
+                     status=BuildStatus.PENDING)
+    t1 = CommandTask(index=1,
+                     phase="build",
+                     command="cmd1",
+                     status=BuildStatus.PENDING)
     assert compute_build_status([t0, t1]) == BuildStatus.PENDING
 
     # 4. In progress (RUNNING)
@@ -492,7 +498,6 @@ def test_compute_build_status():
     assert compute_build_status([t0, t1]) == BuildStatus.DONE
 
 
-
 def test_summary_distinguishes_job_lifecycle_states():
     """Ticket 5: summary table separates PARTIAL, FAILED, ABORTED and DISABLED jobs."""
     from lbs.runner import _build_summary_text
@@ -505,24 +510,35 @@ def test_summary_distinguishes_job_lifecycle_states():
 
     job_summaries = {
         "client-repo": {
-            "status": "PARTIAL", "duration": 1935.0,
-            "commands": tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.SKIPPED)),
+            "status":
+            "PARTIAL",
+            "duration":
+            1935.0,
+            "commands":
+            tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.SKIPPED)),
         },
         "server-repo": {
-            "status": "FAILED", "duration": 250.0,
-            "commands": tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.FAILED)),
+            "status":
+            "FAILED",
+            "duration":
+            250.0,
+            "commands":
+            tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.FAILED)),
         },
         "integration-tests": {
-            "status": "ABORTED", "duration": None,
+            "status": "ABORTED",
+            "duration": None,
             "commands": tasks(("default", BuildStatus.SKIPPED)),
         },
         "legacy-tool": {
-            "status": "DISABLED", "duration": None,
+            "status": "DISABLED",
+            "duration": None,
             "commands": tasks(("default", BuildStatus.SKIPPED)),
         },
     }
 
-    text, _, passed, failed, skipped = _build_summary_text(job_summaries, False, 10.0)
+    text, _, passed, failed, skipped = _build_summary_text(
+        job_summaries, False, 10.0)
 
     assert "PARTIAL    (1/2 phases complete)" in text
     assert "FAILED     (phase 'build')" in text
@@ -541,10 +557,18 @@ def test_runner_partial_job_when_other_job_aborts_run(tmp_path):
     py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
 
     jobs = [
-        Job(name="job-a", cwd=str(tmp_path),
-            phases={"sync": [py_ok], "build": [py_ok]}),
-        Job(name="job-b", cwd=str(tmp_path),
-            phases={"sync": [py_fail], "build": [py_ok]}),
+        Job(name="job-a",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_ok],
+                "build": [py_ok]
+            }),
+        Job(name="job-b",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_fail],
+                "build": [py_ok]
+            }),
     ]
     config = Config(settings=settings, jobs=jobs)
 
@@ -554,3 +578,344 @@ def test_runner_partial_job_when_other_job_aborts_run(tmp_path):
     content = (log_dir / f"{date_str}_session.log").read_text(encoding="utf-8")
     assert "job-a                ->  PARTIAL    (1/2 phases complete)" in content
     assert "job-b                ->  FAILED     (phase 'sync')" in content
+
+
+def test_queue_progress_reporter_quiet_bar_rendering():
+    """Ticket 10: In quiet mode with a TTY, renders live in-place updating single-line bar."""
+    import io
+    import time
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=3,
+        total_commands=6,
+        session_start_time=time.perf_counter(),
+        is_quiet=True,
+        stream=stream,
+        force_tty=True,
+    )
+
+    job = Job(name="build-debug", cwd=".")
+    tasks = [
+        CommandTask(index=0, phase="compile", command="compile 1"),
+        CommandTask(index=1, phase="compile", command="compile 2"),
+    ]
+
+    reporter.start_phase(
+        job=job,
+        phase_name="compile",
+        cmds_to_run_tasks=tasks,
+        log_path="logs/build-debug.log",
+        job_idx=2,
+    )
+
+    val = stream.getvalue()
+    assert "\r" in val
+    assert "[LBS]" in val
+    assert "[2/3]" in val
+    assert "'build-debug'" in val
+    assert "compile" in val
+    assert "Elapsed:" in val
+
+    # Simulate command 1 completing and command 2 running
+    tasks[0].status = BuildStatus.DONE
+    tasks[1].status = BuildStatus.RUNNING
+    job_cmd_tasks = {"build-debug": tasks}
+    reporter.on_command_update(job_cmd_tasks)
+
+    val2 = stream.getvalue()
+    assert "2/2" in val2
+
+
+def test_queue_progress_reporter_milestone_divider():
+    """Ticket 10: In verbose mode, outputs milestone dividers between jobs/phases."""
+    import io
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    job = Job(name="test-job", cwd=".")
+    tasks = [CommandTask(index=0, phase="build", command="make")]
+
+    reporter.start_phase(
+        job=job,
+        phase_name="build",
+        cmds_to_run_tasks=tasks,
+        log_path="logs/test-job.log",
+        job_idx=1,
+    )
+
+    val = stream.getvalue()
+    assert "Queue Progress:" in val
+    assert "Now starting: 'test-job' (phase: build)" in val
+    assert "Active log: logs/test-job.log" in val
+
+
+def test_queue_progress_reporter_window_title_updates():
+    """Ticket 10: Emits ANSI OSC 0 escape sequences to update window/tab title on TTY."""
+    import io
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=4,
+        total_commands=10,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream,
+        force_tty=True,
+    )
+
+    job = Job(name="neo-debug", cwd=".")
+    tasks = [CommandTask(index=0, phase="sync", command="git fetch")]
+
+    reporter.start_phase(
+        job=job,
+        phase_name="sync",
+        cmds_to_run_tasks=tasks,
+        log_path="logs/neo.log",
+        job_idx=3,
+    )
+
+    val = stream.getvalue()
+    assert "\033]0;[3/4] (0%) LBS: neo-debug (sync)\007" in val
+
+    reporter.finish(True)
+    assert "\033]0;LBS: Session SUCCESS\007" in stream.getvalue()
+
+
+def test_queue_progress_reporter_non_tty_degradation():
+    """Ticket 10: Disables ANSI OSC escape sequences and \\r bar when not a TTY."""
+    import io
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream,
+        force_tty=False,
+    )
+
+    job = Job(name="job-pipe", cwd=".")
+    tasks = [CommandTask(index=0, phase="default", command="test")]
+
+    reporter.start_phase(
+        job=job,
+        phase_name="default",
+        cmds_to_run_tasks=tasks,
+        log_path="logs/pipe.log",
+        job_idx=1,
+    )
+
+    val = stream.getvalue()
+    # No ANSI escape sequence
+    assert "\033]0;" not in val
+    # No \\r in quiet mode when non-TTY
+    assert "\r" not in val
+
+
+def test_queue_progress_reporter_safe_chars_fallback():
+    """Ticket 10: Falls back to ASCII chars (#, -, =) if stream cannot encode Unicode."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    class AsciiStream(io.StringIO):
+        encoding = "ascii"
+
+    stream = AsciiStream()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    fill_ch, empty_ch, div_ch = reporter._safe_chars()
+    assert fill_ch == "#"
+    assert empty_ch == "-"
+    assert div_ch == "="
+
+
+def test_queue_progress_reporter_end_phase_frozen_badge():
+    """Ticket 10: In quiet mode, prints frozen badge line when phase finishes."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=2,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream,
+        force_tty=True,
+    )
+
+    reporter.end_phase(
+        job_name="clean-build",
+        phase_name="default",
+        success=True,
+        duration=72.0,
+        is_last_phase=True,
+    )
+
+    val = stream.getvalue()
+    assert "[LBS] [PASS] 'clean-build' completed in 00:01:12\n" in val
+
+
+def test_scheduler_quiet_and_verbose_progress_integration(tmp_path):
+    """Ticket 10: Scheduler.run executes cleanly with progress reporting in quiet and verbose modes."""
+    log_dir = tmp_path / "logs"
+    py_cmd = f'"{sys.executable}" -c "print(\'running\')"'
+
+    # 1. Test quiet mode
+    settings_quiet = Settings(stop_on_failure=False,
+                              log_dir=str(log_dir),
+                              quiet=True)
+    jobs = [
+        Job(name="job-q1", cwd=str(tmp_path), commands=[py_cmd]),
+        Job(name="job-q2", cwd=str(tmp_path), commands=[py_cmd]),
+    ]
+    config_quiet = Config(settings=settings_quiet, jobs=jobs)
+    assert run_scheduler(config_quiet) is True
+
+    # 2. Test verbose mode
+    settings_verbose = Settings(stop_on_failure=False,
+                                log_dir=str(log_dir),
+                                verbose=True)
+    jobs_v = [
+        Job(name="job-v1",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_cmd],
+                "build": [py_cmd]
+            }),
+    ]
+    config_verbose = Config(settings=settings_verbose, jobs=jobs_v)
+    assert run_scheduler(config_verbose) is True
+
+
+def test_queue_progress_reporter_split_screen_enable_disable():
+    """Ticket 10: Verifies 75%/25% split-screen DECSTBM scrolling regions and restoration."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=3,
+        total_commands=6,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    reporter.enable_split_screen()
+    assert reporter.split_active is True
+    val = stream.getvalue()
+    # Check that DECSTBM scrolling region is set (e.g. \033[1;...r)
+    assert f"\033[1;{reporter.scroll_end}r" in val
+    assert "\033[1;1H" in val
+
+    # Test clean disable and full-margin restoration
+    reporter.disable_split_screen()
+    assert reporter.split_active is False
+    val2 = stream.getvalue()
+    # Check that margins reset to full screen (\033[r)
+    assert "\033[r" in val2
+
+
+def test_queue_progress_reporter_split_screen_dashboard_render():
+    """Ticket 10: Verifies that split-screen dashboard paints to bottom rows with cursor restore."""
+    import io
+    import time
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    reporter.enable_split_screen()
+    job = Job(name="build-app", cwd=".")
+    tasks = [
+        CommandTask(index=0,
+                    phase="compile",
+                    command="python3 build.py --shared"),
+        CommandTask(index=1, phase="compile", command="python3 package.py"),
+    ]
+
+    reporter.start_phase(
+        job=job,
+        phase_name="compile",
+        cmds_to_run_tasks=tasks,
+        log_path="logs/build-app.log",
+        job_idx=1,
+    )
+
+    val = stream.getvalue()
+    # Hides cursor and saves cursor position
+    assert "\033[?25l" in val
+    assert "\033[s" in val or "\0337" in val
+    # Writes to row status_start
+    assert f"\033[{reporter.status_start};1H" in val
+    # Restores cursor and shows cursor
+    assert "\033[u" in val or "\0338" in val
+    assert "\033[?25h" in val
+
+    # Contains expected dashboard fields
+    assert "'build-app'" in val
+    assert "Active:" in val
+    assert "Elapsed:" in val
+
+
+def test_queue_progress_reporter_split_screen_disabled_in_quiet_and_non_tty():
+    """Ticket 10: Split-screen is not enabled in quiet mode or non-TTY pipes."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    # 1. Non-TTY
+    stream_non_tty = io.StringIO()
+    reporter1 = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream_non_tty,
+        force_tty=False,
+    )
+    reporter1.enable_split_screen()
+    assert reporter1.split_active is False
+    assert "\033[1;" not in stream_non_tty.getvalue()
+
+    # 2. Quiet mode
+    stream_quiet = io.StringIO()
+    reporter2 = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream_quiet,
+        force_tty=True,
+    )
+    reporter2.enable_split_screen()
+    assert reporter2.split_active is False
