@@ -461,6 +461,58 @@ def test_cli_run_shutdown_skipped_on_dry_run(mock_sub_run, tmp_path, capsys):
     assert "Dry run: skipping the requested system shutdown." in captured.out
 
 
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_skipped_when_jobs_remain_unexecuted(
+        mock_sub_run, tmp_path, capsys):
+    """Ticket 4: a filtered run that succeeds must not power off while other
+    enabled jobs are still unexecuted."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: build-a
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo a"]
+      - name: build-b
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo b"]
+      - name: build-c
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo c"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=False,
+        job=["build-b"],
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_args[0][0] == 0
+
+    assert mock_sub_run.call_count == 0
+    captured = capsys.readouterr()
+    assert ("System shutdown cancelled: 2 jobs in the configuration "
+            "remain unexecuted or skipped.") in captured.err
+    assert "run without job filters" in captured.err
+
+
 def test_cli_run_mode_sequential(tmp_path):
     """Running 'lbs run' with --mode sequential should execute jobs in sequential mode."""
     config_file = tmp_path / "valid.yaml"
