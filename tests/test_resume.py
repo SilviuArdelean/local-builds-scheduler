@@ -14,6 +14,8 @@ from lbs.runner import (
     Scheduler,
     _save_status,
     _parse_and_validate_resume_status,
+    _restore_job_command_tasks,
+    compute_config_hash,
 )
 
 
@@ -725,3 +727,231 @@ def test_status_file_synced_on_stop_on_failure(tmp_path):
     assert len(jobs_data["job-3"]["commands"]) == 2
     for cmd in jobs_data["job-3"]["commands"]:
         assert cmd["status"] == "SKIPPED"
+
+
+def test_restore_job_command_tasks_identity_matching():
+    """Verify that _restore_job_command_tasks matches commands strictly by identity (phase, command),
+    not numeric index, so inserting a command at index 0 defaults the new command to PENDING.
+    """
+    # Saved commands: cmd 0 was 'echo 1' (DONE), cmd 1 was 'exit 1' (FAILED)
+    saved_cmds = [
+        {"index": 0, "phase": "default", "command": "echo 1", "status": "DONE", "exit_code": 0, "duration": 1.5},
+        {"index": 1, "phase": "default", "command": "exit 1", "status": "FAILED", "exit_code": 1, "duration": 0.2},
+    ]
+
+    # Current config inserts 'echo new_setup' at index 0, shifts 'echo 1' to index 1, 'exit 1' to index 2
+    job = Job(
+        name="job-drift",
+        cwd="/tmp",
+        commands=["echo new_setup", "echo 1", "exit 1"],
+    )
+
+    restored = _restore_job_command_tasks(job, saved_cmds)
+    assert len(restored) == 3
+
+    # Command 0: newly inserted, must be PENDING, not inherit DONE!
+    assert restored[0].index == 0
+    assert restored[0].command == "echo new_setup"
+    assert restored[0].status == BuildStatus.PENDING
+    assert restored[0].exit_code is None
+    assert restored[0].duration is None
+
+    # Command 1: 'echo 1' must match saved 'echo 1' and be DONE
+    assert restored[1].index == 1
+    assert restored[1].command == "echo 1"
+    assert restored[1].status == BuildStatus.DONE
+    assert restored[1].exit_code == 0
+    assert restored[1].duration == 1.5
+
+    # Command 2: 'exit 1' must match saved 'exit 1' and be FAILED
+    assert restored[2].index == 2
+    assert restored[2].command == "exit 1"
+    assert restored[2].status == BuildStatus.FAILED
+    assert restored[2].exit_code == 1
+    assert restored[2].duration == 0.2
+
+
+def test_restore_duplicate_identical_commands_sequential():
+    """Verify that duplicate identical commands within the same phase match sequentially."""
+    saved_cmds = [
+        {"index": 0, "phase": "default", "command": "echo duplicate", "status": "DONE", "exit_code": 0, "duration": 0.5},
+        {"index": 1, "phase": "default", "command": "echo duplicate", "status": "FAILED", "exit_code": 1, "duration": 0.3},
+    ]
+
+    job = Job(
+        name="job-dup",
+        cwd="/tmp",
+        commands=["echo duplicate", "echo duplicate"],
+    )
+
+    restored = _restore_job_command_tasks(job, saved_cmds)
+    assert len(restored) == 2
+    assert restored[0].status == BuildStatus.DONE
+    assert restored[0].exit_code == 0
+    assert restored[1].status == BuildStatus.FAILED
+    assert restored[1].exit_code == 1
+
+
+def test_resume_command_identity_inserted_command_e2e(tmp_path, capsys):
+    """End-to-end test reproducing Ticket 3:
+    1. Run job with 'cmd0' (DONE) and 'cmd1' (FAILED).
+    2. Insert 'new_setup' at index 0 and fix 'cmd1'.
+    3. Verify dry-run outputs config drift warning and marks 'new_setup' as [RESUME], not [DONE].
+    4. Run resume and verify 'new_setup' executes while 'cmd0' is skipped.
+    """
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    config_path = "configs/build-inserted.yaml"
+    trace_file = tmp_path / "trace_inserted.txt"
+
+    py_cmd0 = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'cmd0\\n\'); f.close()"'
+    )
+    py_cmd1_fail = (
+        f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+    )
+
+    job_initial = Job(
+        name="job-inserted",
+        cwd=str(tmp_path),
+        commands=[py_cmd0, py_cmd1_fail],
+    )
+    config_initial = Config(settings=settings, jobs=[job_initial])
+
+    # Run 1: Should succeed on cmd0 and fail on cmd1
+    success1 = Scheduler.run(config_initial, config_path=config_path)
+    assert success1 is False
+
+    trace1 = trace_file.read_text(encoding="utf-8").strip().splitlines()
+    assert trace1 == ["cmd0"]
+
+    # Developer inserts py_new_setup at index 0 and fixes cmd1 to py_cmd1_ok
+    py_new_setup = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'new_setup\\n\'); f.close()"'
+    )
+    py_cmd1_ok = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'cmd1_fixed\\n\'); f.close()"'
+    )
+
+    job_modified = Job(
+        name="job-inserted",
+        cwd=str(tmp_path),
+        commands=[py_new_setup, py_cmd0, py_cmd1_ok],
+    )
+    config_modified = Config(settings=settings, jobs=[job_modified])
+
+    # Step 3: Run dry-run with resume
+    capsys.readouterr()  # clear buffer
+    dry_success = Scheduler.run(
+        config_modified,
+        dry_run=True,
+        resume="latest",
+        config_path=config_path,
+    )
+    assert dry_success is True
+
+    captured_dry = capsys.readouterr()
+    # Verify configuration drift warning emitted
+    assert "Warning: Configuration file has changed since the last session. Tasks will be matched strictly by command identity." in captured_dry.err
+    # Verify 'new_setup' is [RESUME], not [DONE]
+    assert "[RESUME]  " + py_new_setup in captured_dry.out
+    # Verify 'cmd0' is [DONE]
+    assert "[DONE]    " + py_cmd0 in captured_dry.out
+
+    # Step 4: Run actual resume
+    success2 = Scheduler.run(
+        config_modified,
+        resume="latest",
+        config_path=config_path,
+    )
+    assert success2 is True
+
+    # Verify execution trace: new_setup executed, cmd0 was NOT re-executed, cmd1_fixed executed
+    trace2 = trace_file.read_text(encoding="utf-8").strip().splitlines()
+    assert trace2 == ["cmd0", "new_setup", "cmd1_fixed"]
+
+    # Verify status on disk
+    status_file = log_dir / "lbs_status_build-inserted.json"
+    with open(status_file, "r", encoding="utf-8") as f:
+        status_data = json.load(f)
+
+    job_status = status_data["jobs"]["job-inserted"]
+    assert job_status["build_status"] == "DONE"
+    assert len(job_status["commands"]) == 3
+    for c in job_status["commands"]:
+        assert c["status"] == "DONE"
+        assert c["exit_code"] == 0
+
+
+def test_resume_command_text_modification_detected(tmp_path, capsys):
+    """Verify that editing command text causes the modified command to be treated as PENDING."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    config_path = "configs/build-mod.yaml"
+    trace_file = tmp_path / "trace_mod.txt"
+
+    cmd_step1 = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'step1\\n\'); f.close()"'
+    )
+    cmd_step2_fail = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'fail\\n\'); f.close(); import sys; sys.exit(1)"'
+    )
+
+    job1 = Job(name="job-mod", cwd=str(tmp_path), commands=[cmd_step1, cmd_step2_fail])
+    config1 = Config(settings=settings, jobs=[job1])
+
+    assert Scheduler.run(config1, config_path=config_path) is False
+
+    # Modify command 2 text
+    cmd_step2_fixed = (
+        f'"{sys.executable}" -c "f = open(r\'{trace_file}\', \'a\'); f.write(\'fixed\\n\'); f.close()"'
+    )
+    job2 = Job(name="job-mod", cwd=str(tmp_path), commands=[cmd_step1, cmd_step2_fixed])
+    config2 = Config(settings=settings, jobs=[job2])
+
+    capsys.readouterr()
+    assert Scheduler.run(config2, resume="latest", config_path=config_path) is True
+
+    captured = capsys.readouterr()
+    assert "Warning: Configuration file has changed since the last session. Tasks will be matched strictly by command identity." in captured.err
+
+    trace = trace_file.read_text(encoding="utf-8").strip().splitlines()
+    assert trace == ["step1", "fail", "fixed"]
+
+
+def test_config_hash_computation_and_persistence(tmp_path):
+    """Verify that compute_config_hash produces deterministic hashes that detect changes,
+    and that config_hash is persisted to the status file."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(log_dir=str(log_dir))
+    config_path = "configs/hash-test.yaml"
+
+    job_a = Job(name="job-a", cwd=str(tmp_path), commands=["echo 1", "echo 2"])
+    config = Config(settings=settings, jobs=[job_a])
+
+    hash1 = compute_config_hash(config)
+    assert isinstance(hash1, str) and len(hash1) == 64  # SHA-256 hex length
+
+    # Identical config produces identical hash
+    job_a_dup = Job(name="job-a", cwd=str(tmp_path), commands=["echo 1", "echo 2"])
+    config_dup = Config(settings=settings, jobs=[job_a_dup])
+    assert compute_config_hash(config_dup) == hash1
+
+    # Adding a command changes hash
+    job_a_added = Job(name="job-a", cwd=str(tmp_path), commands=["echo 1", "echo 2", "echo 3"])
+    assert compute_config_hash(Config(settings=settings, jobs=[job_a_added])) != hash1
+
+    # Reordering commands changes hash
+    job_a_reordered = Job(name="job-a", cwd=str(tmp_path), commands=["echo 2", "echo 1"])
+    assert compute_config_hash(Config(settings=settings, jobs=[job_a_reordered])) != hash1
+
+    # Run scheduler and verify config_hash in status file
+    Scheduler.run(config, config_path=config_path)
+    status_file = log_dir / "lbs_status_hash-test.json"
+    assert status_file.is_file()
+
+    with open(status_file, "r", encoding="utf-8") as f:
+        status_data = json.load(f)
+
+    assert status_data["config_hash"] == hash1
+    assert "config_hash" in status_data["jobs"]["job-a"]

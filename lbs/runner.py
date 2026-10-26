@@ -7,6 +7,7 @@ lbs.runner – Sequential job execution and logging.
 
 from dataclasses import dataclass
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -106,46 +107,145 @@ def compute_build_status(
     return BuildStatus.PENDING
 
 
+class ResumeStatus(tuple):
+    """A 2-tuple of (session_date, saved_summaries) with config_hash metadata."""
+    config_hash: str | None = None
+
+    def __new__(
+        cls,
+        session_date: str,
+        saved_summaries: dict,
+        config_hash: str | None = None,
+    ):
+        instance = super().__new__(cls, (session_date, saved_summaries))
+        instance.config_hash = config_hash
+        return instance
+
+
+class SavedJobSummaries(dict):
+    """Job summaries dictionary carrying optional config_hash metadata."""
+    config_hash: str | None = None
+
+
+def _canonicalize_job_config(job: Job) -> dict:
+    """Extracts a canonical dictionary representation of a Job specification."""
+    tasks = build_job_command_tasks(job)
+    return {
+        "name": job.name,
+        "cwd": str(job.cwd),
+        "commands": [{"phase": t.phase, "command": t.command} for t in tasks],
+        "env": dict(sorted(job.env.items())) if job.env else {},
+        "build_it": job.build_it,
+    }
+
+
+def _canonicalize_summary_entry(name: str, info: dict) -> dict | None:
+    """Extracts a canonical dictionary representation of a saved job summary."""
+    if not isinstance(info, dict):
+        return None
+    cmds = []
+    for c in info.get("commands", []):
+        if isinstance(c, CommandTask):
+            cmds.append({"phase": c.phase, "command": c.command})
+        elif isinstance(c, dict):
+            cmds.append({
+                "phase": c.get("phase", "default"),
+                "command": c.get("command", ""),
+            })
+    return {
+        "name": name,
+        "cwd": str(info.get("cwd", "")),
+        "commands": cmds,
+    }
+
+
+def compute_config_hash(target: Config | list[Job] | dict | None) -> str:
+    """Computes a deterministic SHA-256 hash of job configurations (names, cwds,
+    phases/commands, env, and build_it flags) to detect configuration drift.
+    """
+    if target is None:
+        return ""
+
+    if isinstance(target, Config):
+        canonical_jobs = [_canonicalize_job_config(j) for j in target.jobs]
+    elif isinstance(target, list):
+        canonical_jobs = [_canonicalize_job_config(j) for j in target]
+    elif isinstance(target, dict):
+        entries = (
+            _canonicalize_summary_entry(name, target[name])
+            for name in sorted(target.keys())
+        )
+        canonical_jobs = [e for e in entries if e is not None]
+    else:
+        return ""
+
+    raw_bytes = json.dumps(canonical_jobs, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw_bytes).hexdigest()
+
+
+def _serialize_command_list(raw_commands: list) -> list[dict]:
+    """Converts a list of CommandTask instances or dicts into plain dicts."""
+    serialized = []
+    for cmd_item in raw_commands:
+        if isinstance(cmd_item, CommandTask):
+            serialized.append(cmd_item.to_dict())
+        elif isinstance(cmd_item, dict):
+            serialized.append(cmd_item)
+    return serialized
+
+
+def _resolve_job_build_status(info: dict, raw_commands: list) -> str:
+    """Derives a normalized build_status string from job metadata or command tasks."""
+    build_status = info.get("build_status")
+    if build_status is not None:
+        return build_status if isinstance(build_status, str) else build_status.value
+
+    if raw_commands and all(isinstance(c, CommandTask) for c in raw_commands):
+        return compute_build_status(raw_commands).value
+
+    legacy_status = info.get("status")
+    if legacy_status == "SUCCESS":
+        return BuildStatus.DONE.value
+    if legacy_status in (
+        BuildStatus.FAILED.value,
+        BuildStatus.PENDING.value,
+        BuildStatus.SKIPPED.value,
+        BuildStatus.RUNNING.value,
+    ):
+        return legacy_status
+    return BuildStatus.PENDING.value
+
+
+def _compute_commands_hash(serialized_commands: list[dict]) -> str:
+    """Computes a SHA-256 digest of serialized command items for a job."""
+    cmd_repr = [
+        {"phase": c.get("phase", "default"), "command": c.get("command", "")}
+        for c in serialized_commands
+        if isinstance(c, dict)
+    ]
+    raw_bytes = json.dumps(cmd_repr, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw_bytes).hexdigest()
+
+
 def _serialize_job_summary(info: dict) -> dict:
     """Serializes a single job summary dictionary for status persistence."""
     raw_commands = info.get("commands", [])
-    serialized_commands = []
-    for cmd_item in raw_commands:
-        if isinstance(cmd_item, CommandTask):
-            serialized_commands.append(cmd_item.to_dict())
-        elif isinstance(cmd_item, dict):
-            serialized_commands.append(cmd_item)
+    serialized_commands = _serialize_command_list(raw_commands)
+    build_status_str = _resolve_job_build_status(info, raw_commands)
 
-    build_status = info.get("build_status")
-    if build_status is None:
-        if raw_commands and all(isinstance(c, CommandTask) for c in raw_commands):
-            build_status = compute_build_status(raw_commands).value
-        else:
-            legacy_status = info.get("status")
-            if legacy_status == "SUCCESS":
-                build_status = BuildStatus.DONE.value
-            elif legacy_status in (
-                BuildStatus.FAILED.value,
-                BuildStatus.PENDING.value,
-                BuildStatus.SKIPPED.value,
-                BuildStatus.RUNNING.value,
-            ):
-                build_status = legacy_status
-            else:
-                build_status = BuildStatus.PENDING.value
-
-    status_val = info.get("status", build_status)
+    status_val = info.get("status", build_status_str)
     duration_val = info.get("duration")
     if duration_val is not None:
         duration_val = round(duration_val, 4)
 
     job_record = {
-        "build_status": build_status if isinstance(build_status, str) else build_status.value,
+        "build_status": build_status_str,
         "status": status_val if isinstance(status_val, str) else status_val.value,
         "duration": duration_val,
     }
     if serialized_commands:
         job_record["commands"] = serialized_commands
+        job_record["config_hash"] = _compute_commands_hash(serialized_commands)
     if "cwd" in info:
         job_record["cwd"] = info["cwd"]
 
@@ -157,6 +257,7 @@ def _save_status(
     config_file: str | Path | None,
     session_date: str,
     job_summaries: dict,
+    config_hash: str | None = None,
 ) -> None:
     """Save the current execution status atomically to JSON."""
     serializable_jobs = {
@@ -164,8 +265,12 @@ def _save_status(
         for name, info in job_summaries.items()
     }
 
+    if config_hash is None:
+        config_hash = compute_config_hash(job_summaries)
+
     data = {
         "config_file": str(config_file) if config_file is not None else None,
+        "config_hash": config_hash,
         "session_date": session_date,
         "last_updated": datetime.datetime.now().isoformat(timespec="seconds"),
         "jobs": serializable_jobs,
@@ -321,44 +426,65 @@ def _parse_and_validate_resume_status(
 
     _reconcile_stale_running_status(target_path, status_data, saved_summaries)
 
-    return session_date, saved_summaries
+    config_hash = status_data.get("config_hash")
+    wrapped_summaries = SavedJobSummaries(saved_summaries)
+    wrapped_summaries.config_hash = config_hash
+
+    return ResumeStatus(session_date, wrapped_summaries, config_hash=config_hash)
 
 
 # Backward-compatible alias
 _parse_and_validate_resume_state = _parse_and_validate_resume_status
 
 
+def _find_matching_saved_command(
+    task: CommandTask,
+    saved_cmds: list[dict],
+    consumed_indices: set[int],
+) -> dict | None:
+    """Finds the first unconsumed saved command matching (phase, command)."""
+    for idx, c in enumerate(saved_cmds):
+        if idx in consumed_indices or not isinstance(c, dict):
+            continue
+        if c.get("phase", "default") == task.phase and c.get("command") == task.command:
+            consumed_indices.add(idx)
+            return c
+    return None
+
+
+def _apply_saved_command_status(task: CommandTask, matching: dict | None) -> None:
+    """Overlays saved execution status, exit code, and duration onto a task."""
+    if matching is not None:
+        raw_st = matching.get("status", BuildStatus.PENDING.value)
+        try:
+            task.status = BuildStatus(raw_st)
+        except ValueError:
+            task.status = BuildStatus.PENDING
+        task.exit_code = matching.get("exit_code")
+        task.duration = matching.get("duration")
+    else:
+        task.status = BuildStatus.PENDING
+        task.exit_code = None
+        task.duration = None
+
+
 def _restore_job_command_tasks(job: Job, saved_cmds: list[dict]) -> list[CommandTask]:
-    """Reconstructs and overlays saved command statuses onto the job's command tasks."""
+    """Reconstructs and overlays saved command statuses onto the job's command tasks
+    using strict command identity (phase, command).
+
+    Commands are matched by (phase, command). When multiple identical commands
+    exist within the same phase, they are matched sequentially. Any command
+    that cannot be matched unambiguously retains BuildStatus.PENDING.
+    """
     default_tasks = build_job_command_tasks(job)
     if not saved_cmds:
         return default_tasks
 
-    restored_tasks = []
-    for t in default_tasks:
-        matching = None
-        for c in saved_cmds:
-            if not isinstance(c, dict):
-                continue
-            if c.get("index") == t.index or (
-                c.get("command") == t.command and c.get("phase") == t.phase
-            ):
-                matching = c
-                break
-
-        if matching:
-            raw_st = matching.get("status", BuildStatus.PENDING.value)
-            try:
-                t.status = BuildStatus(raw_st)
-            except ValueError:
-                t.status = BuildStatus.PENDING
-            t.exit_code = matching.get("exit_code")
-            t.duration = matching.get("duration")
-        else:
-            t.status = BuildStatus.PENDING
-
-        restored_tasks.append(t)
-    return restored_tasks
+    consumed_indices: set[int] = set()
+    for task in default_tasks:
+        matching = _find_matching_saved_command(task, saved_cmds, consumed_indices)
+        _apply_saved_command_status(task, matching)
+    return default_tasks
 
 
 def _print_dry_run_job_metadata(job: Job) -> None:
@@ -1022,6 +1148,166 @@ def _update_job_phase_status(
     job_summaries[job.name]["duration"] = job_durations[job.name]
 
 
+def _resolve_succeeded_jobs_on_resume(
+    jobs: list[Job],
+    saved_summaries: dict,
+) -> set[str]:
+    """Identifies which jobs in the configuration are already fully completed."""
+    succeeded = set()
+    for job in jobs:
+        if job.name not in saved_summaries:
+            continue
+        info = saved_summaries[job.name]
+        if not isinstance(info, dict):
+            continue
+        saved_cmds = info.get("commands", [])
+        if saved_cmds:
+            restored = _restore_job_command_tasks(job, saved_cmds)
+            if restored and all(t.status == BuildStatus.DONE for t in restored):
+                succeeded.add(job.name)
+        else:
+            if (
+                info.get("status") == "SUCCESS"
+                or info.get("build_status") == BuildStatus.DONE.value
+            ):
+                succeeded.add(job.name)
+    return succeeded
+
+
+def _check_and_warn_config_drift(
+    saved_config_hash: str | None,
+    current_config_hash: str,
+) -> None:
+    """Emits a warning to stderr if configuration drifted since the last session."""
+    if saved_config_hash is not None and saved_config_hash != current_config_hash:
+        print(
+            "Warning: Configuration file has changed since the last session. "
+            "Tasks will be matched strictly by command identity.",
+            file=sys.stderr,
+        )
+
+
+def _filter_phase_commands_to_run(
+    job: Job,
+    phase_name: str,
+    job_command_tasks: dict[str, list[CommandTask]],
+    job_summaries: dict,
+    job_phase_results: dict,
+    aborted: bool,
+    resume: str | None,
+) -> list[CommandTask] | None:
+    """Evaluates task eligibility for execution, reconciling aborted/completed states.
+    Returns the list of CommandTasks to run, or None if the phase should be skipped.
+    """
+    is_job_done = (
+        job_summaries[job.name].get("status") == "SUCCESS"
+        or job_summaries[job.name].get("build_status") == BuildStatus.DONE.value
+    )
+    if is_job_done and resume == "latest":
+        return None
+
+    if not job.build_it:
+        return None
+
+    if aborted:
+        if job_summaries[job.name]["status"] == "PENDING":
+            job_summaries[job.name]["status"] = "SKIPPED"
+            job_summaries[job.name]["build_status"] = BuildStatus.SKIPPED.value
+            for t in job_command_tasks[job.name]:
+                if t.status == BuildStatus.PENDING:
+                    t.status = BuildStatus.SKIPPED
+        return None
+
+    phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
+    if resume == "latest" and phase_tasks and all(t.status == BuildStatus.DONE for t in phase_tasks):
+        job_phase_results[job.name][phase_name] = True
+        return None
+
+    cmds_to_run = (
+        [t for t in phase_tasks if t.status != BuildStatus.DONE]
+        if resume == "latest"
+        else phase_tasks
+    )
+    if not cmds_to_run:
+        job_phase_results[job.name][phase_name] = True
+        return None
+
+    return cmds_to_run
+
+
+def _execute_phase_run(
+    job: Job,
+    phase_name: str,
+    cmds_to_run_tasks: list[CommandTask],
+    job_command_tasks: dict[str, list[CommandTask]],
+    job_summaries: dict,
+    job_durations: dict,
+    job_phase_results: dict,
+    job_failed: dict,
+    status_path: Path,
+    config_path: str | Path | None,
+    session_date: str,
+    current_config_hash: str,
+    verbose_mode: bool,
+    log_dir: Path,
+    log_to_session,
+    stop_on_failure: bool,
+    phases_to_run: set[str],
+) -> tuple[bool, bool]:
+    """Runs a single phase execution attempt and persists state.
+    Returns (success: bool, should_abort: bool).
+    """
+    phase_display = f" (phase: {phase_name})" if phase_name != "default" else ""
+    log_to_session(f"Starting job: {job.name}{phase_display} (cwd: {job.cwd})")
+
+    def status_cb():
+        b_st = compute_build_status(job_command_tasks[job.name], job.build_it)
+        job_summaries[job.name]["build_status"] = b_st.value
+        job_summaries[job.name]["status"] = "SUCCESS" if b_st == BuildStatus.DONE else b_st.value
+        _save_status(status_path, config_path, session_date, job_summaries, config_hash=current_config_hash)
+
+    cmds_to_run_tasks[0].status = BuildStatus.RUNNING
+    job_summaries[job.name]["build_status"] = BuildStatus.RUNNING.value
+    job_summaries[job.name]["status"] = "RUNNING"
+    _save_status(status_path, config_path, session_date, job_summaries, config_hash=current_config_hash)
+
+    p_success, p_duration = _run_single_job(
+        job=job,
+        verbose=verbose_mode,
+        log_dir=log_dir,
+        session_date=session_date,
+        log_to_session=log_to_session,
+        phase_name=phase_name,
+        commands=[t.command for t in cmds_to_run_tasks],
+        tasks=cmds_to_run_tasks,
+        on_status_change=status_cb,
+    )
+
+    job_durations[job.name] += p_duration
+    job_phase_results[job.name][phase_name] = p_success
+
+    should_abort = False
+    if p_success:
+        log_to_session(f"Job {job.name}{phase_display}: SUCCESS (took {p_duration:.2f}s)")
+    else:
+        job_failed[job.name] = True
+        log_to_session(f"Job {job.name}{phase_display}: FAILED (took {p_duration:.2f}s)")
+        if stop_on_failure:
+            log_to_session("Aborting execution of subsequent jobs (stop_on_failure is enabled)")
+            should_abort = True
+
+    _update_job_phase_status(
+        job=job,
+        phases_to_run=phases_to_run,
+        job_phase_results=job_phase_results,
+        job_command_tasks=job_command_tasks,
+        job_durations=job_durations,
+        job_summaries=job_summaries,
+    )
+    _save_status(status_path, config_path, session_date, job_summaries, config_hash=current_config_hash)
+    return p_success, should_abort
+
+
 class Scheduler:
     """Orchestrates execution of job queues, phase filtering, and logging."""
 
@@ -1054,27 +1340,17 @@ class Scheduler:
         succeeded_jobs = set()
         session_date = None
         saved_summaries = {}
+        saved_config_hash = None
+        current_config_hash = compute_config_hash(config)
 
         if resume == "latest":
-            session_date, saved_summaries = _parse_and_validate_resume_status(status_path)
-            succeeded_jobs = {
-                name
-                for name, info in saved_summaries.items()
-                if isinstance(info, dict) and (
-                    info.get("status") == "SUCCESS"
-                    or info.get("build_status") == BuildStatus.DONE.value
-                )
-            }
+            session_date, saved_summaries = _parse_and_validate_resume_status(
+                status_path)
+            saved_config_hash = getattr(saved_summaries, "config_hash", None)
+            _check_and_warn_config_drift(saved_config_hash, current_config_hash)
+            succeeded_jobs = _resolve_succeeded_jobs_on_resume(config.jobs, saved_summaries)
 
-            # If all selected jobs are already succeeded:
-            selected_succeeded = all(
-                isinstance(saved_summaries.get(name), dict)
-                and (
-                    saved_summaries[name].get("status") == "SUCCESS"
-                    or saved_summaries[name].get("build_status") == BuildStatus.DONE.value
-                )
-                for name in jobs_to_run)
-            if selected_succeeded:
+            if all(name in succeeded_jobs for name in jobs_to_run):
                 print(
                     "All selected jobs in the previous session completed successfully. Nothing to resume."
                 )
@@ -1126,6 +1402,11 @@ class Scheduler:
 
             if resume == "latest":
                 log_to_session("--- Session resumed ---")
+                if saved_config_hash is not None and saved_config_hash != current_config_hash:
+                    log_to_session(
+                        "Warning: Configuration file has changed since the last session. "
+                        "Tasks will be matched strictly by command identity."
+                    )
             else:
                 log_to_session("--- Session started ---")
 
@@ -1136,7 +1417,7 @@ class Scheduler:
             # Save initial state if not resuming
             if resume != "latest":
                 _save_status(status_path, config_path, session_date,
-                             job_summaries)
+                             job_summaries, config_hash=current_config_hash)
 
             verbose_mode = getattr(config.settings, "verbose", True)
             if getattr(config.settings, "quiet", False):
@@ -1152,97 +1433,57 @@ class Scheduler:
             active_job = None
             try:
                 for job, phase_name in execution_tasks:
-                    is_job_done = (
-                        job_summaries[job.name].get("status") == "SUCCESS"
-                        or job_summaries[job.name].get("build_status") == BuildStatus.DONE.value
+                    cmds_to_run_tasks = _filter_phase_commands_to_run(
+                        job=job,
+                        phase_name=phase_name,
+                        job_command_tasks=job_command_tasks,
+                        job_summaries=job_summaries,
+                        job_phase_results=job_phase_results,
+                        aborted=aborted,
+                        resume=resume,
                     )
-                    if is_job_done and resume == "latest":
-                        continue
-
-                    if not job.build_it:
-                        continue
-
-                    if aborted:
-                        if job_summaries[job.name]["status"] == "PENDING":
-                            job_summaries[job.name]["status"] = "SKIPPED"
-                            job_summaries[job.name]["build_status"] = BuildStatus.SKIPPED.value
-                            for t in job_command_tasks[job.name]:
-                                if t.status == BuildStatus.PENDING:
-                                    t.status = BuildStatus.SKIPPED
-                        continue
-
-                    phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
-                    if resume == "latest" and phase_tasks and all(t.status == BuildStatus.DONE for t in phase_tasks):
-                        job_phase_results[job.name][phase_name] = True
-                        continue
-
-                    cmds_to_run_tasks = [t for t in phase_tasks if t.status != BuildStatus.DONE] if resume == "latest" else phase_tasks
-                    if not cmds_to_run_tasks:
-                        job_phase_results[job.name][phase_name] = True
+                    if cmds_to_run_tasks is None:
                         continue
 
                     if mode == "phased" and current_phase_header != phase_name and phase_name != "default":
                         current_phase_header = phase_name
                         log_to_session(f"--- Starting Phase: {phase_name} ---")
 
-                    phase_display = f" (phase: {phase_name})" if phase_name != "default" else ""
-                    log_to_session(f"Starting job: {job.name}{phase_display} (cwd: {job.cwd})")
-
-                    def status_cb():
-                        b_st = compute_build_status(job_command_tasks[job.name], job.build_it)
-                        job_summaries[job.name]["build_status"] = b_st.value
-                        job_summaries[job.name]["status"] = "SUCCESS" if b_st == BuildStatus.DONE else b_st.value
-                        _save_status(status_path, config_path, session_date, job_summaries)
-
-                    cmds_to_run_tasks[0].status = BuildStatus.RUNNING
-                    job_summaries[job.name]["build_status"] = BuildStatus.RUNNING.value
-                    job_summaries[job.name]["status"] = "RUNNING"
-                    _save_status(status_path, config_path, session_date, job_summaries)
-
                     active_job = job
-                    p_success, p_duration = _run_single_job(
+                    p_success, should_abort = _execute_phase_run(
                         job=job,
-                        verbose=verbose_mode,
-                        log_dir=log_dir,
-                        session_date=session_date,
-                        log_to_session=log_to_session,
                         phase_name=phase_name,
-                        commands=[t.command for t in cmds_to_run_tasks],
-                        tasks=cmds_to_run_tasks,
-                        on_status_change=status_cb,
+                        cmds_to_run_tasks=cmds_to_run_tasks,
+                        job_command_tasks=job_command_tasks,
+                        job_summaries=job_summaries,
+                        job_durations=job_durations,
+                        job_phase_results=job_phase_results,
+                        job_failed=job_failed,
+                        status_path=status_path,
+                        config_path=config_path,
+                        session_date=session_date,
+                        current_config_hash=current_config_hash,
+                        verbose_mode=verbose_mode,
+                        log_dir=log_dir,
+                        log_to_session=log_to_session,
+                        stop_on_failure=config.settings.stop_on_failure,
+                        phases_to_run=phases_to_run,
                     )
                     active_job = None
 
-                    job_durations[job.name] += p_duration
-                    job_phase_results[job.name][phase_name] = p_success
-
-                    if p_success:
-                        succ_msg = f"Job {job.name}{phase_display}: SUCCESS (took {p_duration:.2f}s)"
-                        log_to_session(succ_msg)
-                    else:
+                    if not p_success:
                         overall_success = False
-                        job_failed[job.name] = True
-                        fail_msg = f"Job {job.name}{phase_display}: FAILED (took {p_duration:.2f}s)"
-                        log_to_session(fail_msg)
-
-                        if config.settings.stop_on_failure:
-                            log_to_session(
-                                "Aborting execution of subsequent jobs (stop_on_failure is enabled)"
-                            )
-                            aborted = True
-
-                    _update_job_phase_status(
-                        job=job,
-                        phases_to_run=phases_to_run,
-                        job_phase_results=job_phase_results,
-                        job_command_tasks=job_command_tasks,
-                        job_durations=job_durations,
-                        job_summaries=job_summaries,
-                    )
-                    _save_status(status_path, config_path, session_date, job_summaries)
+                    if should_abort:
+                        aborted = True
 
                 # Unconditional save to disk after execution tasks complete
-                _save_status(status_path, config_path, session_date, job_summaries)
+                _save_status(
+                    status_path,
+                    config_path,
+                    session_date,
+                    job_summaries,
+                    config_hash=current_config_hash,
+                )
 
             except KeyboardInterrupt:
                 log_to_session("--- Session interrupted by user (Ctrl+C) ---")
@@ -1264,7 +1505,13 @@ class Scheduler:
                             if t.status == BuildStatus.PENDING:
                                 t.status = BuildStatus.SKIPPED
 
-                _save_status(status_path, config_path, session_date, job_summaries)
+                _save_status(
+                    status_path,
+                    config_path,
+                    session_date,
+                    job_summaries,
+                    config_hash=current_config_hash,
+                )
 
                 passed_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "SUCCESS")
                 interrupted_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "INTERRUPTED")
