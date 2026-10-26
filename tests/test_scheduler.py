@@ -362,7 +362,7 @@ def test_scheduler_sequential_mode_failure_stop_on_failure(tmp_path):
     content = session_log.read_text(encoding="utf-8")
 
     assert "job-alpha            ->  FAILED" in content
-    assert "job-beta             ->  SKIPPED" in content
+    assert "job-beta             ->  ABORTED" in content
     assert "Starting job: job-alpha (phase: build)" not in content
     assert "Starting job: job-beta (phase: sync)" not in content
 

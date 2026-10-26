@@ -151,7 +151,7 @@ settings:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `log_dir` | `string` | `"logs"` | Directory path where session summaries, state files (`lbs_state.json`), concurrency locks (`lbs.lock`), and job log files are written. Relative paths are resolved relative to the current working directory from which `lbs` is invoked. The directory is created automatically if it does not exist. |
-| `stop_on_failure` | `boolean` | `false` | When `true`, any job or phase failure halts the scheduler immediately, marking all remaining jobs in the execution queue as `SKIPPED`. When `false`, LBS logs the failure and continues executing subsequent jobs. |
+| `stop_on_failure` | `boolean` | `false` | When `true`, any job or phase failure halts the scheduler immediately, marking unexecuted jobs as `ABORTED` (or `PARTIAL` if earlier phases completed). When `false`, LBS logs the failure and continues executing subsequent jobs. |
 | `quiet` | `boolean` | `false` | When `true`, suppresses live streaming of command output to the terminal (silent mode) while continuing to capture full logs in the job log files and printing the final summary table. Can also be enabled via CLI flag `-q` / `--quiet`. |
 | `verbose` | `boolean` | `true` | (*Legacy / Alternate*) Live output streaming is enabled by default (`true`). Setting `verbose: false` is equivalent to `quiet: true`. If `quiet: true` is set, it takes precedence. |
 | `notifications` | `object` | `None` | Notification triggers and endpoint configurations. |
@@ -625,13 +625,30 @@ lbs run configs/my-config.yaml --resume latest
 #### How Resume Works:
 1. LBS reads `lbs_state.json` from the configured `log_dir`.
 2. Any job that previously achieved status `SUCCESS` is **completely skipped**.
-3. Any job that was `FAILED`, `PENDING`, or `SKIPPED` is scheduled for re-execution.
+3. Any job that was `FAILED`, `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED` is scheduled for re-execution.
 4. **Within a job attempt, execution begins at the first command of the incomplete phase.** There are no mid-command checkpoints.
 5. If all target jobs have already succeeded, LBS outputs:
    ```
    All selected jobs in the previous session completed successfully. Nothing to resume.
    ```
    and exits cleanly with code `0`.
+
+---
+
+### 6.4 Job Lifecycle Statuses & Progress Reporting
+
+LBS classifies completed and non-completed jobs with distinct lifecycle states in both console session summaries and saved state (`lbs_state.json` / `lbs_status_<config>.json`):
+
+| Status | Description | Resume Behavior |
+| :--- | :--- | :--- |
+| `SUCCESS` | All phases and commands completed successfully (exit code 0). | Skipped upon resume. |
+| `FAILED` | A command failed (non-zero exit code or timeout). | Re-executed from the incomplete command/phase. |
+| `PARTIAL` | Job halted mid-execution (e.g. completed early phases, but halted before finishing because another job failed under `stop_on_failure: true` or run was interrupted). | Re-executed from the first incomplete command/phase. |
+| `ABORTED` | Job was enabled and queued, but never started because a preceding failure triggered `stop_on_failure: true` or the run was interrupted. | Re-executed upon resume. |
+| `DISABLED` | Explicitly turned off via `build_it: false`. | Skipped upon resume unless re-enabled. |
+| `INTERRUPTED` | The active job executing when the user aborted with Ctrl+C. | Re-executed from the incomplete command/phase. |
+
+In the post-run terminal summary and session log, an inline progress indicator clarifies exact progress at a glance (e.g. `(1/2 phases complete)`, `(phase 'build')`, or `(never started)`).
 
 ---
 

@@ -21,7 +21,7 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 - **Detailed Session & Job Logging**: Generates high-level session summaries as well as separate, real-time command output logs for every job.
 - **Notification Integration**: Dispatches rich notifications via Slack/Discord webhooks, SMTP emails, or native desktop alerts (balloon tips on Windows).
 - **Concurrency Prevention**: Uses native, cross-platform file locking (`lbs.lock`) in the log directory to ensure only one instance runs at a time.
-- **Session Resuming**: Save state automatically, allowing you to resume interrupted sessions from the last failed or skipped job using `--resume latest`.
+- **Session Resuming**: Save state automatically, allowing you to resume interrupted sessions from incomplete (failed, partial, aborted, or skipped) jobs using `--resume latest`.
 - **Dry-Run Mode**: Validate and view the full planned execution details (including paths, environment variables, commands, retries, and timeouts) without running any commands.
 - **Secure Credentials**: Separate notification files (`notifications.yaml`) and support environment variable interpolation (e.g., `${SMTP_PASSWORD}`) to avoid committing secrets to source control.
 
@@ -157,7 +157,7 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Quiet Run** | `lbs run config.yaml -q` | Suppresses live command output streaming to the terminal (silent mode); logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
-| **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the failed or skipped jobs from the previous session. |
+| **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
 | **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs, then schedules an OS shutdown **only if every job succeeded**. A failed session leaves the machine powered on for diagnosis. |
@@ -184,7 +184,7 @@ lbs run <config-path> [options]
 * `-q`, `--quiet` — Suppress live command execution output from being streamed to the console (full logs are still recorded to disk under `log_dir`, and the final summary table is still printed).
 * `-j <job-name>`, `--job <job-name>` — Filter to run *only* the specified job. Can be specified multiple times (e.g. `lbs run config.yaml -j compile -j test`).
 * `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
-* `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the failed or skipped jobs.
+* `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the incomplete (failed, partial, aborted, or skipped) jobs.
 * `-n <path>`, `--notifications-config <path>` — Path to a separate YAML file containing private notification settings (e.g., SMTP credentials, Slack/Discord webhooks) to merge with the main config.
 * `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
 * `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all jobs in the session complete (60-second delay; abort via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). The shutdown is only scheduled when the session **succeeds**: if any job fails the machine is deliberately left running so the failure can be diagnosed, and a message explaining the skip is written to stderr. It is also skipped under `--dry-run`, which executes no jobs.
@@ -234,7 +234,7 @@ lbs run config.yaml --resume latest
 This reads `lbs_state.json` and:
 1. Reconstructs the status of all jobs from the session.
 2. Skips all jobs that have already completed with a `SUCCESS` status.
-3. Sequentially executes only the remaining `FAILED`, `PENDING`, or `SKIPPED` jobs.
+3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED`) jobs.
 4. If all selected jobs had already succeeded, it outputs a status message and exits immediately.
 
 ---

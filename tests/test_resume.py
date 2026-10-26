@@ -613,7 +613,7 @@ def test_disabled_job_command_tasks_skipped(tmp_path):
 
     disabled_info = status_data["jobs"]["job-disabled"]
     assert disabled_info["build_status"] == "SKIPPED"
-    assert disabled_info["status"] == "SKIPPED"
+    assert disabled_info["status"] == "DISABLED"
     for c in disabled_info["commands"]:
         assert c["status"] == "SKIPPED"
 
@@ -686,7 +686,7 @@ def test_scheduler_keyboard_interrupt_graceful_handling(tmp_path, capsys):
     jobs_data = data["jobs"]
     assert jobs_data["job-1"]["status"] == "INTERRUPTED"
     assert jobs_data["job-1"]["build_status"] == "FAILED"
-    assert jobs_data["job-2"]["status"] == "SKIPPED"
+    assert jobs_data["job-2"]["status"] == "ABORTED"
     assert jobs_data["job-2"]["build_status"] == "SKIPPED"
 
 
@@ -722,7 +722,7 @@ def test_status_file_synced_on_stop_on_failure(tmp_path):
     assert jobs_data["job-2"]["status"] == "FAILED"
     assert jobs_data["job-2"]["build_status"] == "FAILED"
 
-    assert jobs_data["job-3"]["status"] == "SKIPPED"
+    assert jobs_data["job-3"]["status"] == "ABORTED"
     assert jobs_data["job-3"]["build_status"] == "SKIPPED"
     assert len(jobs_data["job-3"]["commands"]) == 2
     for cmd in jobs_data["job-3"]["commands"]:

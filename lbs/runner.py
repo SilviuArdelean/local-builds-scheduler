@@ -886,6 +886,64 @@ def _format_job_duration(dur: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d} ({total_sec} seconds)"
 
 
+# Job-level statuses that mean "did not run to completion, and did not fail".
+NOT_COMPLETED_STATUSES = ("SKIPPED", "PENDING", "PARTIAL", "ABORTED", "DISABLED")
+
+
+def _mark_job_not_run(job_summary: dict, tasks: list[CommandTask]) -> None:
+    """Marks a never-finished job as PARTIAL (some commands already DONE) or
+    ABORTED (nothing ran), and flags its remaining pending commands as SKIPPED."""
+    any_done = any(t.status == BuildStatus.DONE for t in tasks)
+    job_summary["status"] = "PARTIAL" if any_done else "ABORTED"
+    job_summary["build_status"] = BuildStatus.SKIPPED.value
+    for t in tasks:
+        if t.status == BuildStatus.PENDING:
+            t.status = BuildStatus.SKIPPED
+
+
+def _task_field(task, field: str):
+    """Reads a field from a CommandTask or its dict form."""
+    if isinstance(task, dict):
+        return task.get(field)
+    return getattr(task, field, None)
+
+
+def _describe_job_progress(summary: dict) -> str:
+    """Returns a short human-readable progress note for the summary table."""
+    status = summary["status"]
+    if status == "DISABLED":
+        return "(build_it: false)"
+    if status == "ABORTED":
+        return "(never started)"
+
+    tasks = summary.get("commands") or []
+    done_value = BuildStatus.DONE.value
+
+    def is_done(t) -> bool:
+        st = _task_field(t, "status")
+        return (st.value if isinstance(st, BuildStatus) else st) == done_value
+
+    if status == "PARTIAL":
+        phases: dict[str, list] = {}
+        for t in tasks:
+            phases.setdefault(_task_field(t, "phase"), []).append(t)
+        if len(phases) > 1:
+            complete = sum(1 for ts in phases.values() if all(is_done(t) for t in ts))
+            return f"({complete}/{len(phases)} phases complete)"
+        done = sum(1 for t in tasks if is_done(t))
+        return f"({done}/{len(tasks)} commands complete)"
+
+    if status == "FAILED":
+        for t in tasks:
+            st = _task_field(t, "status")
+            if (st.value if isinstance(st, BuildStatus) else st) == BuildStatus.FAILED.value:
+                phase = _task_field(t, "phase")
+                if phase and phase != "default":
+                    return f"(phase '{phase}')"
+                return f"(command {_task_field(t, 'index') + 1})"
+    return ""
+
+
 def _build_summary_text(
     job_summaries: dict,
     overall_success: bool,
@@ -902,7 +960,9 @@ def _build_summary_text(
         status = summary["status"]
         dur = summary["duration"]
         dur_str = _format_job_duration(dur)
-        summary_lines.append(f"Job: {name:<20} ->  {status:<10} {dur_str}")
+        detail = _describe_job_progress(summary)
+        detail_col = f"{detail:<22} " if detail else ""
+        summary_lines.append(f"Job: {name:<20} ->  {status:<10} {detail_col}{dur_str}")
     summary_lines.append("=" * 50)
 
     session_status = "SUCCESS" if overall_success else "FAILED"
@@ -914,7 +974,7 @@ def _build_summary_text(
     failed_count = sum(1 for s in job_summaries.values()
                        if s["status"] in ("FAILED", "INTERRUPTED"))
     skipped_count = sum(1 for s in job_summaries.values()
-                        if s["status"] in ("SKIPPED", "PENDING"))
+                        if s["status"] in NOT_COMPLETED_STATUSES)
 
     total_seconds = int(elapsed_time)
     hours = total_seconds // 3600
@@ -1027,7 +1087,7 @@ def _init_job_states(
                 b_status = compute_build_status(job_command_tasks[job.name], job.build_it)
                 st_val = "SUCCESS" if b_status == BuildStatus.DONE else b_status.value
                 if not job.build_it:
-                    st_val = "SKIPPED"
+                    st_val = "DISABLED"
                 job_summaries[job.name] = {
                     "build_status": b_status.value,
                     "status": st_val,
@@ -1040,7 +1100,12 @@ def _init_job_states(
             if not job.build_it:
                 for t in default_tasks:
                     t.status = BuildStatus.SKIPPED
-            status_val = "PENDING" if (job.name in jobs_to_run and job.build_it) else "SKIPPED"
+            if not job.build_it:
+                status_val = "DISABLED"
+            elif job.name in jobs_to_run:
+                status_val = "PENDING"
+            else:
+                status_val = "SKIPPED"
             b_status_val = BuildStatus.PENDING.value if (job.name in jobs_to_run and job.build_it) else BuildStatus.SKIPPED.value
             job_summaries[job.name] = {
                 "build_status": b_status_val,
@@ -1170,11 +1235,7 @@ def _filter_phase_commands_to_run(
 
     if aborted:
         if job_summaries[job.name]["status"] == "PENDING":
-            job_summaries[job.name]["status"] = "SKIPPED"
-            job_summaries[job.name]["build_status"] = BuildStatus.SKIPPED.value
-            for t in job_command_tasks[job.name]:
-                if t.status == BuildStatus.PENDING:
-                    t.status = BuildStatus.SKIPPED
+            _mark_job_not_run(job_summaries[job.name], job_command_tasks[job.name])
         return None
 
     phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
@@ -1458,11 +1519,10 @@ class Scheduler:
 
                 for rem_job, _ in execution_tasks:
                     if job_summaries[rem_job.name]["status"] == "PENDING":
-                        job_summaries[rem_job.name]["status"] = "SKIPPED"
-                        job_summaries[rem_job.name]["build_status"] = BuildStatus.SKIPPED.value
-                        for t in job_command_tasks.get(rem_job.name, []):
-                            if t.status == BuildStatus.PENDING:
-                                t.status = BuildStatus.SKIPPED
+                        _mark_job_not_run(
+                            job_summaries[rem_job.name],
+                            job_command_tasks.get(rem_job.name, []),
+                        )
 
                 _save_status(
                     status_path,
@@ -1474,7 +1534,7 @@ class Scheduler:
 
                 passed_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "SUCCESS")
                 interrupted_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "INTERRUPTED")
-                pending_cnt = sum(1 for s in job_summaries.values() if s.get("status") in ("PENDING", "SKIPPED"))
+                pending_cnt = sum(1 for s in job_summaries.values() if s.get("status") in NOT_COMPLETED_STATUSES)
                 cfg_display = str(config_path) if config_path else "<config>"
 
                 print(

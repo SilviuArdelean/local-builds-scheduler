@@ -149,7 +149,7 @@ def test_runner_stop_on_failure(tmp_path):
     session_content = session_log.read_text(encoding="utf-8")
     assert "Aborting execution of subsequent jobs (stop_on_failure is enabled)" in session_content
     assert "job-one              ->  FAILED" in session_content
-    assert "job-two              ->  SKIPPED" in session_content
+    assert "job-two              ->  ABORTED    (never started)" in session_content
     assert "Session completed: FAILED" in session_content
     assert "Run Summary" in session_content
     assert "Passed: 0" in session_content
@@ -321,7 +321,7 @@ def test_runner_skips_disabled_jobs(tmp_path):
     assert "Starting job: job-three" in session_log_content
 
     assert "job-one              ->  SUCCESS" in session_log_content
-    assert "job-two              ->  SKIPPED" in session_log_content
+    assert "job-two              ->  DISABLED   (build_it: false)" in session_log_content
     assert "job-three            ->  SUCCESS" in session_log_content
     assert "Passed: 2" in session_log_content
     assert "Failed: 0" in session_log_content
@@ -491,3 +491,66 @@ def test_compute_build_status():
     t1.status = BuildStatus.DONE
     assert compute_build_status([t0, t1]) == BuildStatus.DONE
 
+
+
+def test_summary_distinguishes_job_lifecycle_states():
+    """Ticket 5: summary table separates PARTIAL, FAILED, ABORTED and DISABLED jobs."""
+    from lbs.runner import _build_summary_text
+
+    def tasks(*specs):
+        return [
+            CommandTask(index=i, phase=p, command=f"cmd{i}", status=s)
+            for i, (p, s) in enumerate(specs)
+        ]
+
+    job_summaries = {
+        "client-repo": {
+            "status": "PARTIAL", "duration": 1935.0,
+            "commands": tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.SKIPPED)),
+        },
+        "server-repo": {
+            "status": "FAILED", "duration": 250.0,
+            "commands": tasks(("sync", BuildStatus.DONE), ("build", BuildStatus.FAILED)),
+        },
+        "integration-tests": {
+            "status": "ABORTED", "duration": None,
+            "commands": tasks(("default", BuildStatus.SKIPPED)),
+        },
+        "legacy-tool": {
+            "status": "DISABLED", "duration": None,
+            "commands": tasks(("default", BuildStatus.SKIPPED)),
+        },
+    }
+
+    text, _, passed, failed, skipped = _build_summary_text(job_summaries, False, 10.0)
+
+    assert "PARTIAL    (1/2 phases complete)" in text
+    assert "FAILED     (phase 'build')" in text
+    assert "ABORTED    (never started)" in text
+    assert "DISABLED   (build_it: false)" in text
+    assert (passed, failed, skipped) == (0, 1, 3)
+
+
+def test_runner_partial_job_when_other_job_aborts_run(tmp_path):
+    """Ticket 5: a job that finished its first phase is PARTIAL, not SKIPPED,
+    when another job's failure aborts the rest of the run."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+
+    py_ok = f'"{sys.executable}" -c "print(1)"'
+    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+
+    jobs = [
+        Job(name="job-a", cwd=str(tmp_path),
+            phases={"sync": [py_ok], "build": [py_ok]}),
+        Job(name="job-b", cwd=str(tmp_path),
+            phases={"sync": [py_fail], "build": [py_ok]}),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    assert run_scheduler(config) is False
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    content = (log_dir / f"{date_str}_session.log").read_text(encoding="utf-8")
+    assert "job-a                ->  PARTIAL    (1/2 phases complete)" in content
+    assert "job-b                ->  FAILED     (phase 'sync')" in content
