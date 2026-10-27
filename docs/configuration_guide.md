@@ -623,10 +623,10 @@ lbs run configs/my-config.yaml --resume latest
 ```
 
 #### How Resume Works:
-1. LBS reads `lbs_state.json` from the configured `log_dir`.
+1. LBS reads the config-scoped status file (`lbs_status_<config>.json`, falling back to `lbs_state.json`) from the configured `log_dir`.
 2. Any job that previously achieved status `SUCCESS` is **completely skipped**.
 3. Any job that was `FAILED`, `PARTIAL`, `ABORTED`, `PENDING`, or `SKIPPED` is scheduled for re-execution.
-4. **Within a job attempt, execution begins at the first command of the incomplete phase.** There are no mid-command checkpoints.
+4. **Command-Level Granularity**: Within an incomplete or interrupted job, LBS tracks each individual command. Commands already marked `DONE` are skipped, resuming execution immediately from the first incomplete or failed command/phase.
 5. If all target jobs have already succeeded, LBS outputs:
    ```
    All selected jobs in the previous session completed successfully. Nothing to resume.
@@ -637,7 +637,7 @@ lbs run configs/my-config.yaml --resume latest
 
 ### 6.4 Job Lifecycle Statuses & Progress Reporting
 
-LBS classifies completed and non-completed jobs with distinct lifecycle states in both console session summaries and saved state (`lbs_state.json` / `lbs_status_<config>.json`):
+LBS classifies completed and non-completed jobs with distinct lifecycle states in both console session summaries and saved state (`lbs_status_<config>.json` / `lbs_state.json`):
 
 | Status | Description | Resume Behavior |
 | :--- | :--- | :--- |
@@ -649,6 +649,37 @@ LBS classifies completed and non-completed jobs with distinct lifecycle states i
 | `INTERRUPTED` | The active job executing when the user aborted with Ctrl+C. | Re-executed from the incomplete command/phase. |
 
 In the post-run terminal summary and session log, an inline progress indicator clarifies exact progress at a glance (e.g. `(1/2 phases complete)`, `(phase 'build')`, or `(never started)`).
+
+#### 6.4.1 Live Terminal Split-Screen & Status Indicators
+
+When executing in an interactive terminal (TTY), LBS delivers a real-time, non-intrusive progress experience without sacrificing compiler visibility:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ [compiler stdout/stderr scrolling in top ~75% viewport]               │
+│ Compiling src/module.cc...                                             │
+│ Linking build/bin/engine.dll...                                        │
+├────────────────────────────────────────────────────────────────────────┤
+│ [LBS Pinned Dashboard - bottom ~25% viewport]                          │
+│ [LBS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│ [LBS] [████████████░░░░░░░░] 60% [3/5] | 'core-engine' (phase 'build') │
+│ [LBS] Active: [2/4] ninja -C out/Release core_engine                   │
+│ [LBS] Elapsed: 00:14:32 | Queue: 2 passed, 0 failed | Remaining: 2     │
+│ [LBS] Active log: logs/2026-10-27_engine_build.log                     │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Split-Screen Terminal (Default)**:
+   - Uses ANSI `DECSTBM` scrolling margins (`\033[1;<N>r`) to confine streaming child process output to the top ~75% of the console window.
+   - The bottom ~25% stays pinned with a persistent queue dashboard updating task completion, active job/phase, running command line, queue counts, elapsed timer, and active log destination.
+   - Restores normal scrolling margins (`\033[r`) automatically on completion, error, or early exit (`atexit`).
+2. **Quiet Mode (`-q` / `--quiet`)**:
+   - For minimal distraction, passing `-q` suppresses the compiler streaming viewport and renders a single-line in-place updating progress bar (`\r`).
+   - When a phase or job finishes, it prints a permanent frozen completion milestone line (e.g. `[LBS] [PASS] 'job-name' (phase 'build') completed in 00:03:12`).
+3. **Dynamic Terminal / Tab Titles**:
+   - LBS emits ANSI OSC 0 escape sequences (`\033]0;...\007`) on supported terminals, updating your window or tab title to `[X/Y] (pct%) LBS: <job> (<phase>)` so you can glance at build progress while multitasking.
+4. **CI & Non-TTY Graceful Fallback**:
+   - When output is redirected to a file, pipe, or CI runner (where `sys.stdout.isatty()` is False), ANSI scrolling margins and cursor positioning are automatically disabled, falling back to clean sequential stdout logging.
 
 ---
 
