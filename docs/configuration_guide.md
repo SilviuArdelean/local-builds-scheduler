@@ -642,6 +642,40 @@ When an interrupted or failed session left state you wish to discard, you can st
   Cleared saved session state for <config>.
   ```
 
+#### 6.3.2 Inspecting Saved Build Queue State (`lbs status`)
+
+To check what happened in an overnight run, crash, or interrupted session without starting execution:
+```bash
+lbs status configs/chromium-both.yaml
+```
+Output:
+```
+LBS Session Status: configs/chromium-both.yaml
+Profile State: logs/lbs_status_chromium-both.json
+Session Started: 2026-10-22 23:15:00 | Last Updated: 2026-10-23 01:42:10
+Outcome: FAILED (Halted on job 'chromium-debug', phase 'compile')
+
+Jobs:
+  [PASS]  chromium-release    (sync: DONE, compile: DONE)           took 01:45:12
+  [FAIL]  chromium-debug      (sync: DONE, compile: FAILED at cmd 3) took 00:42:01
+  [SKIP]  package-artifacts   (not started, aborted by failure)     (-)
+  [OFF]   upload-symbols      (disabled: build_it is false)         (-)
+
+Action:
+  To resume from the failed step, run:
+    lbs run configs/chromium-both.yaml --resume latest
+```
+
+* **`--json` Flag**: Emits the raw saved status profile as structured JSON for programmatic inspection in scripts or CI:
+  ```bash
+  lbs status configs/chromium-both.yaml --json
+  ```
+* **Exit Codes**:
+  * `0`: All enabled jobs completed with `SUCCESS`.
+  * `1`: One or more jobs failed, were interrupted, or remain uncompleted.
+  * `2`: No saved session state exists for the configuration, or configuration syntax is invalid.
+* **Stale Running Reconciliation**: If an overnight run crashed or terminated abruptly, leaving jobs in a `RUNNING` state, `lbs status` safely reconciles them to `FAILED` and persists the updated profile before reporting.
+
 ---
 
 ### 6.4 Job Lifecycle Statuses & Progress Reporting

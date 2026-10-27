@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 
-from lbs.config import Config, Job, BuildStatus, resolve_status_path
+from lbs.config import Config, Job, BuildStatus, resolve_status_path, load_config
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
 
@@ -482,6 +482,217 @@ def clean_session_state(
                         pass
 
     return removed_any
+
+
+def _compute_status_exit_code(config: Config | None, saved_jobs: dict) -> int:
+    """Returns 0 if all enabled jobs succeeded, 1 if any failed/aborted/incomplete."""
+    if not saved_jobs:
+        return 1
+    if config:
+        for job in config.jobs:
+            if not job.build_it:
+                continue
+            info = saved_jobs.get(job.name)
+            if not info or info.get("status") != "SUCCESS":
+                return 1
+        return 0
+    for info in saved_jobs.values():
+        if isinstance(info, dict):
+            st = info.get("status")
+            if st != "SUCCESS" and st != "DISABLED":
+                return 1
+    return 0
+
+
+def _describe_status_job_detail(info: dict | None, is_disabled: bool = False) -> str:
+    """Formats the detail string (phase/command breakdown) for a job in lbs status."""
+    if is_disabled:
+        return "(disabled: build_it is false)"
+    if not info:
+        return "(pending)"
+
+    status = info.get("status", "PENDING")
+    if status == "DISABLED":
+        return "(disabled: build_it is false)"
+    if status == "ABORTED":
+        return "(not started, aborted by failure)"
+
+    raw_commands = info.get("commands", [])
+    if not raw_commands:
+        if status == "SUCCESS":
+            return "(DONE)"
+        return f"({status.lower()})"
+
+    # Group commands by phase preserving appearance order
+    phases: dict[str, list[dict]] = {}
+    for idx, c in enumerate(raw_commands):
+        p_name = c.get("phase", "default")
+        c_copy = dict(c)
+        c_copy["global_idx"] = idx
+        phases.setdefault(p_name, []).append(c_copy)
+
+    has_named_phases = len(phases) > 1 or any(k != "default" for k in phases.keys())
+
+    if has_named_phases:
+        phase_notes = []
+        for p_name, p_cmds in phases.items():
+            if all(c.get("status") == "DONE" for c in p_cmds):
+                phase_notes.append(f"{p_name}: DONE")
+            elif any(c.get("status") == "FAILED" for c in p_cmds):
+                failed_cmd = next(c for c in p_cmds if c.get("status") == "FAILED")
+                cmd_num = failed_cmd["global_idx"] + 1
+                phase_notes.append(f"{p_name}: FAILED at cmd {cmd_num}")
+            elif any(c.get("status") == "INTERRUPTED" for c in p_cmds):
+                intr_cmd = next(c for c in p_cmds if c.get("status") == "INTERRUPTED")
+                cmd_num = intr_cmd["global_idx"] + 1
+                phase_notes.append(f"{p_name}: INTERRUPTED at cmd {cmd_num}")
+            elif any(c.get("status") == "RUNNING" for c in p_cmds):
+                phase_notes.append(f"{p_name}: RUNNING")
+            else:
+                done_count = sum(1 for c in p_cmds if c.get("status") == "DONE")
+                if done_count > 0:
+                    phase_notes.append(f"{p_name}: PARTIAL ({done_count}/{len(p_cmds)})")
+                else:
+                    phase_notes.append(f"{p_name}: PENDING")
+        return f"({', '.join(phase_notes)})"
+
+    # Default phase (single sequence of commands without explicit phase names)
+    if status == "SUCCESS":
+        return "(DONE)"
+    if status == "FAILED":
+        failed_cmd = next((c for c in raw_commands if c.get("status") == "FAILED"), None)
+        cmd_num = (raw_commands.index(failed_cmd) + 1) if failed_cmd else 1
+        return f"(FAILED at cmd {cmd_num})"
+    if status == "INTERRUPTED":
+        intr_cmd = next((c for c in raw_commands if c.get("status") == "INTERRUPTED"), None)
+        cmd_num = (raw_commands.index(intr_cmd) + 1) if intr_cmd else 1
+        return f"(interrupted at cmd {cmd_num})"
+    if status == "PARTIAL":
+        done_count = sum(1 for c in raw_commands if c.get("status") == "DONE")
+        return f"({done_count}/{len(raw_commands)} commands complete)"
+
+    return f"({status.lower()})"
+
+
+def format_session_status(
+    status_data: dict,
+    config: Config | None = None,
+    config_path: str | Path | None = None,
+    status_path: str | Path | None = None,
+) -> tuple[str, int]:
+    """Formats saved session status into a human-readable dashboard string and returns exit code."""
+    saved_jobs = status_data.get("jobs", {})
+    session_date = status_data.get("session_date", "Unknown")
+    last_updated = status_data.get("last_updated", "Unknown")
+    if isinstance(last_updated, str) and "T" in last_updated:
+        last_updated = last_updated.replace("T", " ")
+
+    actual_config_path = str(config_path) if config_path else status_data.get("config_file") or "unknown"
+    actual_status_path = str(status_path) if status_path else "unknown"
+
+    # Determine job order: prefer config order if config is provided
+    job_order: list[tuple[str, bool]] = []
+    if config:
+        for j in config.jobs:
+            job_order.append((j.name, not j.build_it))
+    configured_names = {name for name, _ in job_order}
+    for name in saved_jobs.keys():
+        if name not in configured_names:
+            job_order.append((name, False))
+
+    job_rows = []
+    has_uncompleted = False
+    failed_job = None
+    failed_phase = None
+    interrupted_job = None
+
+    for job_name, is_disabled in job_order:
+        info = saved_jobs.get(job_name, {})
+        status = info.get("status", "PENDING")
+        if is_disabled:
+            status = "DISABLED"
+
+        if is_disabled or status == "DISABLED":
+            tag = "OFF"
+        elif status == "SUCCESS":
+            tag = "PASS"
+        elif status == "FAILED":
+            tag = "FAIL"
+            has_uncompleted = True
+            if failed_job is None:
+                failed_job = job_name
+                for c in info.get("commands", []):
+                    if c.get("status") == "FAILED":
+                        p = c.get("phase", "default")
+                        if p != "default":
+                            failed_phase = p
+                        break
+        elif status == "INTERRUPTED":
+            tag = "INTR"
+            has_uncompleted = True
+            if interrupted_job is None:
+                interrupted_job = job_name
+        elif status == "PARTIAL":
+            tag = "PART"
+            has_uncompleted = True
+        elif status == "ABORTED":
+            tag = "SKIP"
+            has_uncompleted = True
+        else:  # PENDING / WAITING
+            tag = "WAIT"
+            has_uncompleted = True
+
+        dur = info.get("duration")
+        dur_str = f"took {_format_job_duration(dur)}" if dur is not None and dur > 0 else "(-)"
+        detail = _describe_status_job_detail(info, is_disabled=is_disabled)
+
+        job_rows.append({
+            "tag": tag,
+            "name": job_name,
+            "detail": detail,
+            "duration": dur_str,
+        })
+
+    # Determine overall outcome
+    if interrupted_job:
+        outcome = f"INTERRUPTED (Cancelled on job '{interrupted_job}')"
+    elif failed_job:
+        if failed_phase:
+            outcome = f"FAILED (Halted on job '{failed_job}', phase '{failed_phase}')"
+        else:
+            outcome = f"FAILED (Halted on job '{failed_job}')"
+    elif has_uncompleted:
+        outcome = "INCOMPLETE (Some jobs remain unexecuted)"
+    else:
+        outcome = "SUCCESS (All scheduled jobs completed successfully)"
+
+    exit_code = _compute_status_exit_code(config, saved_jobs)
+
+    # Column widths for nice alignment
+    max_name_len = max([len(r["name"]) for r in job_rows], default=20)
+    max_name_len = max(max_name_len, 20)
+    max_detail_len = max([len(r["detail"]) for r in job_rows], default=30)
+
+    lines = [
+        f"LBS Session Status: {actual_config_path}",
+        f"Profile State: {actual_status_path}",
+        f"Session Started: {session_date} | Last Updated: {last_updated}",
+        f"Outcome: {outcome}",
+        "",
+        "Jobs:",
+    ]
+
+    for r in job_rows:
+        tag_str = f"[{r['tag']}]"
+        lines.append(f"  {tag_str:<7} {r['name']:<{max_name_len}} {r['detail']:<{max_detail_len}} {r['duration']}")
+
+    if has_uncompleted:
+        lines.append("")
+        lines.append("Action:")
+        lines.append("  To resume from the failed step, run:")
+        lines.append(f"    lbs run {actual_config_path} --resume latest")
+
+    return "\n".join(lines), exit_code
 
 
 def _find_matching_saved_command(
@@ -1872,6 +2083,53 @@ class Scheduler:
     ) -> bool:
         """Removes saved status file and any related temporary session/progress files."""
         return clean_session_state(config_file=config_path or config, log_dir=log_dir)
+
+    @staticmethod
+    def status(
+        config_path: str | Path | None = None,
+        config: Config | None = None,
+        log_dir: str | Path | None = None,
+        as_json: bool = False,
+    ) -> tuple[str, int]:
+        """Inspects saved session status for a configuration without executing."""
+        if config is None and config_path is not None:
+            config = load_config(config_path)
+
+        resolved_log_dir = log_dir
+        if resolved_log_dir is None:
+            resolved_log_dir = config.settings.log_dir if config else "logs"
+
+        status_path = resolve_status_path(resolved_log_dir, config_path)
+        target_path = status_path
+        if not target_path.is_file():
+            fallback_status = status_path.parent / "lbs_status.json"
+            fallback_legacy = status_path.parent / "lbs_state.json"
+            if fallback_status.is_file():
+                target_path = fallback_status
+            elif fallback_legacy.is_file():
+                target_path = fallback_legacy
+            else:
+                raise ValueError(
+                    f"No saved session state found for {config_path or 'configuration'} (file does not exist)."
+                )
+
+        with open(target_path, "r", encoding="utf-8") as f:
+            status_data = json.load(f)
+
+        _reconcile_stale_running_status(
+            target_path, status_data, status_data.get("jobs", {})
+        )
+
+        if as_json:
+            exit_code = _compute_status_exit_code(config, status_data.get("jobs", {}))
+            return json.dumps(status_data, indent=2), exit_code
+
+        return format_session_status(
+            status_data=status_data,
+            config=config,
+            config_path=config_path,
+            status_path=target_path,
+        )
 
     @staticmethod
     def run(

@@ -203,6 +203,28 @@ def cmd_clean(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def cmd_status(args: argparse.Namespace) -> None:
+    """Handle the 'lbs status <config>' subcommand."""
+    try:
+        config = load_config(args.config)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        output, exit_code = Scheduler.status(
+            config_path=args.config,
+            config=config,
+            as_json=args.json,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    print(output)
+    sys.exit(exit_code)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the argument parser."""
     parser = argparse.ArgumentParser(
@@ -310,6 +332,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     clean_parser.add_argument("config", help="Path to the YAML config file.")
     clean_parser.set_defaults(func=cmd_clean)
+
+    # lbs status <config>
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Inspect saved session status for a config without executing.",
+    )
+    status_parser.add_argument("config", help="Path to the YAML config file.")
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output status data as JSON instead of human-readable text.",
+    )
+    status_parser.set_defaults(func=cmd_status)
 
     return parser
 

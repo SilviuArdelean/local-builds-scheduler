@@ -158,8 +158,9 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Quiet Run** | `lbs run config.yaml -q` | Suppresses live compiler output streaming to the terminal and renders an in-place updating single-line progress bar; logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
-| **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
+| **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_status_<config>.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
 | **Fresh Run** | `lbs run config.yaml --fresh` | Discards any existing saved session state and starts all jobs from the beginning without requiring manual state file deletion. |
+| **Inspect Session Status** | `lbs status config.yaml` | Inspects saved build queue status without executing, displaying per-job outcomes, phase details, elapsed times, and resume suggestions. |
 | **Clean Session State** | `lbs clean config.yaml` | Deletes the profile-scoped status file (`lbs_status_<config>.json`) and temporary session files. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
@@ -193,6 +194,16 @@ lbs run <config-path> [options]
 * `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
 * `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all jobs in the session complete (60-second delay; abort via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). The shutdown is only scheduled when the session **succeeds**: if any job fails the machine is deliberately left running so the failure can be diagnosed, and a message explaining the skip is written to stderr. It is also skipped under `--dry-run`, which executes no jobs.
 
+#### `status`
+Inspect saved session status for a configuration without executing.
+
+```bash
+lbs status <config-path> [options]
+```
+
+**Options:**
+* `--json` — Output saved session status data as structured JSON instead of human-readable text.
+
 #### `clean`
 Remove saved session state and temporary progress logs for a specific configuration file.
 
@@ -222,9 +233,9 @@ lbs list <config-path>
 ## Exit Codes
 
 The tool exits with explicit, predictable codes:
-* `0` — Success: all scheduled jobs completed successfully.
-* `1` — Job Failure: one or more jobs failed.
-* `2` — Setup/Configuration Error: command argument parse failures, configuration syntax errors, lock file contention, or invalid job filter names.
+* `0` — Success: all scheduled jobs completed successfully (or in `lbs status`, all enabled jobs succeeded).
+* `1` — Job Failure: one or more jobs failed, were interrupted, or remain uncompleted (or in `lbs status`, uncompleted/failed jobs exist).
+* `2` — Setup/Configuration Error: command argument parse failures, configuration syntax errors, lock file contention, missing saved session state in `lbs status`, or invalid job filter names.
 
 ---
 

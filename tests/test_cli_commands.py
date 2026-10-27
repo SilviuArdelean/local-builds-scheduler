@@ -926,3 +926,317 @@ def test_cli_run_fresh_and_resume_mutually_exclusive(tmp_path):
     )
     assert result.returncode == 2
     assert "not allowed with argument" in result.stderr or "mutually exclusive" in result.stderr
+
+
+def test_cli_status_success(tmp_path):
+    """Running 'lbs status' on a fully successful session returns exit code 0."""
+    config_file = tmp_path / "status_success.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "print(1)"'],
+            },
+            {
+                "name": "job-2",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "print(2)"'],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    # Run session
+    run_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert run_res.returncode == 0
+
+    # Query status
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 0
+    assert "LBS Session Status:" in status_res.stdout
+    assert "Profile State:" in status_res.stdout
+    assert "Outcome: SUCCESS" in status_res.stdout
+    assert "[PASS]" in status_res.stdout
+    assert "job-1" in status_res.stdout
+    assert "job-2" in status_res.stdout
+    assert "Action:" not in status_res.stdout
+
+
+def test_cli_status_failure(tmp_path):
+    """Running 'lbs status' on a failed session returns exit code 1 and resume action."""
+    config_file = tmp_path / "status_failure.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+            "stop_on_failure": True,
+        },
+        "jobs": [
+            {
+                "name": "job-pass",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "print(1)"'],
+            },
+            {
+                "name": "job-fail",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 1
+    assert "Outcome: FAILED (Halted on job 'job-fail')" in status_res.stdout
+    assert "[PASS]" in status_res.stdout
+    assert "[FAIL]" in status_res.stdout
+    assert "Action:" in status_res.stdout
+    assert f"lbs run {config_file.as_posix()} --resume latest" in status_res.stdout.replace("\\", "/")
+
+
+def test_cli_status_nonexistent(tmp_path):
+    """Running 'lbs status' with no existing status file exits with code 2."""
+    config_file = tmp_path / "status_none.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": ["echo 1"],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 2
+    assert "No saved session state found" in status_res.stderr
+
+
+def test_cli_status_invalid_config(tmp_path):
+    """Running 'lbs status' with an invalid config exits with code 2."""
+    config_file = tmp_path / "invalid.yaml"
+    config_file.write_text("jobs: []", encoding="utf-8")
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 2
+    assert "Error:" in status_res.stderr
+
+
+def test_cli_status_json(tmp_path):
+    """Running 'lbs status --json' produces valid JSON output and returns proper exit code."""
+    import json
+    config_file = tmp_path / "status_json.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+            "stop_on_failure": True,
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "print(1)"'],
+            },
+            {
+                "name": "job-2",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file), "--json"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 1
+    data = json.loads(status_res.stdout)
+    assert "jobs" in data
+    assert data["jobs"]["job-1"]["status"] == "SUCCESS"
+    assert data["jobs"]["job-2"]["status"] == "FAILED"
+
+
+def test_cli_status_reconciles_stale_running(tmp_path):
+    """Running 'lbs status' reconciles any stale RUNNING job to FAILED."""
+    import json
+    config_file = tmp_path / "status_stale.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+        },
+        "jobs": [
+            {
+                "name": "job-crashed",
+                "cwd": str(workspace_dir),
+                "commands": ["echo 1"],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    # Manually craft a status file with RUNNING
+    from lbs.config import resolve_status_path
+    status_file = resolve_status_path(log_dir, config_file)
+    status_data = {
+        "config_file": str(config_file),
+        "session_date": "2026-10-27 20:00:00",
+        "last_updated": "2026-10-27 20:05:00",
+        "jobs": {
+            "job-crashed": {
+                "status": "RUNNING",
+                "commands": [{"cmd": "echo 1", "status": "RUNNING"}],
+            }
+        },
+    }
+    status_file.write_text(json.dumps(status_data), encoding="utf-8")
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 1
+    assert "[FAIL]" in status_res.stdout
+    assert "Outcome: FAILED (Halted on job 'job-crashed')" in status_res.stdout
+
+    # Verify status on disk was updated to FAILED
+    updated_data = json.loads(status_file.read_text(encoding="utf-8"))
+    assert updated_data["jobs"]["job-crashed"]["status"] == "FAILED"
+
+
+def test_cli_status_phased_failure_and_disabled(tmp_path):
+    """Running 'lbs status' formats phased jobs and disabled jobs accurately."""
+    config_file = tmp_path / "status_phased.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+            "stop_on_failure": True,
+        },
+        "jobs": [
+            {
+                "name": "job-release",
+                "cwd": str(workspace_dir),
+                "phases": {
+                    "sync": [f'"{sys.executable}" -c "print(1)"'],
+                    "compile": [f'"{sys.executable}" -c "print(2)"'],
+                },
+            },
+            {
+                "name": "job-debug",
+                "cwd": str(workspace_dir),
+                "phases": {
+                    "sync": [f'"{sys.executable}" -c "print(3)"'],
+                    "compile": [
+                        f'"{sys.executable}" -c "print(4)"',
+                        f'"{sys.executable}" -c "import sys; sys.exit(1)"',
+                    ],
+                },
+            },
+            {
+                "name": "job-disabled",
+                "build_it": False,
+                "cwd": str(workspace_dir),
+                "commands": ["echo disabled"],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--mode", "sequential"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 1
+    assert "Outcome: FAILED (Halted on job 'job-debug', phase 'compile')" in status_res.stdout
+    assert "[PASS]" in status_res.stdout
+    assert "compile: DONE" in status_res.stdout
+    assert "sync: DONE" in status_res.stdout
+    assert "[FAIL]" in status_res.stdout
+    assert "compile: FAILED at cmd 2" in status_res.stdout
+    assert "[OFF]" in status_res.stdout
+    assert "(disabled: build_it is false)" in status_res.stdout
