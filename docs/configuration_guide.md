@@ -633,6 +633,15 @@ lbs run configs/my-config.yaml --resume latest
    ```
    and exits cleanly with code `0`.
 
+#### 6.3.1 Discarding Stale Resume State (`--fresh` and `lbs clean`)
+
+When an interrupted or failed session left state you wish to discard, you can start completely from scratch without manually locating and deleting files in the `logs/` directory:
+- **`lbs run <config> --fresh`** (or `--ignore-saved-state`): Resets the profile-scoped status file and temporary logs before execution starts, executing all jobs from the beginning.
+- **`lbs clean <config>`**: Deletes `logs/lbs_status_<config_stem>.json` and temporary session files without executing any jobs. Confirms:
+  ```
+  Cleared saved session state for <config>.
+  ```
+
 ---
 
 ### 6.4 Job Lifecycle Statuses & Progress Reporting

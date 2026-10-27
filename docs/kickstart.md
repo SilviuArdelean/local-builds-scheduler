@@ -187,3 +187,11 @@ lbs run my-build-config.yaml -j compile-project
   lbs run my-build-config.yaml --resume latest
   ```
   **Granular Resumption**: LBS skips jobs that already completed with `SUCCESS`. For jobs that were `FAILED`, `PARTIAL`, `ABORTED`, or `INTERRUPTED`, LBS matches commands against the saved status profile and **skips commands that already succeeded (`DONE`)**, resuming execution immediately from the first incomplete command.
+* **Starting Fresh**: To discard prior state and run all jobs from scratch without manual file deletion:
+  ```bash
+  lbs run my-build-config.yaml --fresh
+  ```
+  Or clean the saved session state file and temporary session files directly:
+  ```bash
+  lbs clean my-build-config.yaml
+  ```
