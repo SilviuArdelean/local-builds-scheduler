@@ -1216,7 +1216,7 @@ def test_cli_status_phased_failure_and_disabled(tmp_path):
             },
         ],
     }
-    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
 
     subprocess.run(
         [sys.executable, "-m", "lbs", "run", str(config_file), "--mode", "sequential"],
@@ -1234,9 +1234,8 @@ def test_cli_status_phased_failure_and_disabled(tmp_path):
     assert status_res.returncode == 1
     assert "Outcome: FAILED (Halted on job 'job-debug', phase 'compile')" in status_res.stdout
     assert "[PASS]" in status_res.stdout
-    assert "compile: DONE" in status_res.stdout
-    assert "sync: DONE" in status_res.stdout
+    assert "sync: DONE, compile: DONE" in status_res.stdout
     assert "[FAIL]" in status_res.stdout
-    assert "compile: FAILED at cmd 2" in status_res.stdout
+    assert "sync: DONE, compile: FAILED at cmd 3" in status_res.stdout
     assert "[OFF]" in status_res.stdout
     assert "(disabled: build_it is false)" in status_res.stdout
