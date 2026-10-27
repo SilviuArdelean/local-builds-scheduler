@@ -159,6 +159,8 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
 | **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_state.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
+| **Fresh Run** | `lbs run config.yaml --fresh` | Discards any existing saved session state and starts all jobs from the beginning without requiring manual state file deletion. |
+| **Clean Session State** | `lbs clean config.yaml` | Deletes the profile-scoped status file (`lbs_status_<config>.json`) and temporary session files. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
 | **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs, then schedules an OS shutdown **only if every job succeeded**. A failed session leaves the machine powered on for diagnosis. |
@@ -186,9 +188,17 @@ lbs run <config-path> [options]
 * `-j <job-name>`, `--job <job-name>` — Filter to run *only* the specified job. Can be specified multiple times (e.g. `lbs run config.yaml -j compile -j test`).
 * `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
 * `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the incomplete (failed, partial, aborted, or skipped) jobs.
+* `--fresh`, `--ignore-saved-state` — Discard any existing saved session state (`lbs_status_<config>.json`) and temporary session files, executing all jobs from the beginning. Mutually exclusive with `--resume`.
 * `-n <path>`, `--notifications-config <path>` — Path to a separate YAML file containing private notification settings (e.g., SMTP credentials, Slack/Discord webhooks) to merge with the main config.
 * `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
 * `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all jobs in the session complete (60-second delay; abort via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). The shutdown is only scheduled when the session **succeeds**: if any job fails the machine is deliberately left running so the failure can be diagnosed, and a message explaining the skip is written to stderr. It is also skipped under `--dry-run`, which executes no jobs.
+
+#### `clean`
+Remove saved session state and temporary progress logs for a specific configuration file.
+
+```bash
+lbs clean <config-path>
+```
 
 #### `validate`
 Check if the provided configuration file exists, is valid YAML, and conforms to the schema.
@@ -237,6 +247,12 @@ This reads the saved status file and:
 2. Skips all jobs that have already completed with a `SUCCESS` status.
 3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
 4. If all selected jobs had already succeeded, it outputs a status message and exits immediately.
+
+### Discarding Stale Resume State (`--fresh` and `lbs clean`)
+
+When an earlier run was aborted, corrupted, or you wish to re-run the entire build pipeline from scratch:
+- **`lbs run config.yaml --fresh`** (or `--ignore-saved-state`): Resets saved state before execution begins and runs all jobs from the beginning. Cannot be combined with `--resume`.
+- **`lbs clean config.yaml`**: Removes `logs/lbs_status_<config>.json` and temporary session files without launching a build. Confirms: `Cleared saved session state for config.yaml.` (or `No saved session state found for config.yaml. Nothing to clean.`).
 
 ---
 

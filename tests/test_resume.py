@@ -12,6 +12,7 @@ import pytest
 from lbs.config import Config, Settings, Job, resolve_status_path, BuildStatus
 from lbs.runner import (
     Scheduler,
+    clean_session_state,
     _save_status,
     _parse_and_validate_resume_status,
     _restore_job_command_tasks,
@@ -955,3 +956,97 @@ def test_config_hash_computation_and_persistence(tmp_path):
 
     assert status_data["config_hash"] == hash1
     assert "config_hash" not in status_data["jobs"]["job-a"]
+
+
+def test_clean_session_state_unit(tmp_path):
+    """Verify clean_session_state removes status file and temporary files for the target profile only."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    config_path = tmp_path / "my_project.yaml"
+
+    status_file = log_dir / "lbs_status_my_project.json"
+    status_file.write_text('{"jobs": {}}', encoding="utf-8")
+    tmp_file = log_dir / "lbs_status_my_project_123.tmp"
+    tmp_file.write_text("temporary", encoding="utf-8")
+    reconcile_tmp = log_dir / "lbs_status_my_project_reconcile_456.tmp"
+    reconcile_tmp.write_text("temporary reconcile", encoding="utf-8")
+
+    # Another profile's files in the same log directory
+    other_status = log_dir / "lbs_status_other_project.json"
+    other_status.write_text('{"jobs": {}}', encoding="utf-8")
+    other_tmp = log_dir / "lbs_status_other_project_789.tmp"
+    other_tmp.write_text("other temporary", encoding="utf-8")
+    other_reconcile = log_dir / "lbs_status_other_project_reconcile_012.tmp"
+    other_reconcile.write_text("other temporary reconcile", encoding="utf-8")
+
+    # Cleaning with config_path and log_dir
+    cleaned = clean_session_state(config_file=config_path, log_dir=str(log_dir))
+    assert cleaned is True
+    assert not status_file.exists()
+    assert not tmp_file.exists()
+    assert not reconcile_tmp.exists()
+
+    # Other profile's files must NOT be touched
+    assert other_status.exists()
+    assert other_tmp.exists()
+    assert other_reconcile.exists()
+
+    # Second call returns False (nothing to clean)
+    assert clean_session_state(config_file=config_path, log_dir=str(log_dir)) is False
+
+
+def test_clean_session_state_legacy_fallback(tmp_path):
+    """Verify clean_session_state also cleans legacy lbs_state.json and default temp files."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    legacy_file = log_dir / "lbs_state.json"
+    legacy_file.write_text('{"jobs": {}}', encoding="utf-8")
+    default_status = log_dir / "lbs_status.json"
+    default_status.write_text('{"jobs": {}}', encoding="utf-8")
+    default_tmp = log_dir / "lbs_status_default_123.tmp"
+    default_tmp.write_text("temp", encoding="utf-8")
+    default_reconcile = log_dir / "lbs_status_default_reconcile_456.tmp"
+    default_reconcile.write_text("temp", encoding="utf-8")
+    legacy_reconcile = log_dir / "lbs_status_reconcile_789.tmp"
+    legacy_reconcile.write_text("temp", encoding="utf-8")
+
+    # Another profile's file
+    other_status = log_dir / "lbs_status_custom.json"
+    other_status.write_text('{"jobs": {}}', encoding="utf-8")
+    other_tmp = log_dir / "lbs_status_custom_999.tmp"
+    other_tmp.write_text("temp", encoding="utf-8")
+
+    cleaned = clean_session_state(config_file=None, log_dir=str(log_dir))
+    assert cleaned is True
+    assert not legacy_file.exists()
+    assert not default_status.exists()
+    assert not default_tmp.exists()
+    assert not default_reconcile.exists()
+    assert not legacy_reconcile.exists()
+
+    # Other profile's files must NOT be touched
+    assert other_status.exists()
+    assert other_tmp.exists()
+
+
+def test_scheduler_clean_method(tmp_path):
+    """Verify Scheduler.clean delegates to clean_session_state."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    config = Config(settings=Settings(log_dir=str(log_dir)), jobs=[])
+
+    status_file = log_dir / "lbs_status.json"
+    status_file.write_text('{"jobs": {}}', encoding="utf-8")
+
+    assert Scheduler.clean(config=config) is True
+    assert not status_file.exists()
+    assert Scheduler.clean(config=config) is False
+
+
+def test_scheduler_run_fresh_and_resume_mutually_exclusive(tmp_path):
+    """Verify Scheduler.run raises ValueError if both fresh and resume are set."""
+    config = Config(settings=Settings(log_dir=str(tmp_path)), jobs=[])
+    with pytest.raises(ValueError) as exc:
+        Scheduler.run(config, resume="latest", fresh=True)
+    assert "Cannot specify both 'fresh' and 'resume'" in str(exc.value)

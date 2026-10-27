@@ -242,9 +242,14 @@ def _save_status(
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
 
+    temp_prefix = (
+        f"{status_path.stem}_"
+        if status_path.name != "lbs_status.json"
+        else "lbs_status_default_"
+    )
     temp_fd, temp_path = tempfile.mkstemp(
         dir=str(status_path.parent),
-        prefix="lbs_status_",
+        prefix=temp_prefix,
         suffix=".tmp",
     )
     try:
@@ -323,9 +328,14 @@ def _reconcile_stale_running_status(
             info["status"] = "SUCCESS"
 
     if stale_reconciled:
+        temp_prefix = (
+            f"{target_path.stem}_reconcile_"
+            if target_path.name != "lbs_status.json"
+            else "lbs_status_default_reconcile_"
+        )
         temp_fd, temp_path = tempfile.mkstemp(
             dir=str(target_path.parent),
-            prefix="lbs_status_reconcile_",
+            prefix=temp_prefix,
             suffix=".tmp",
         )
         try:
@@ -399,6 +409,79 @@ def _parse_and_validate_resume_status(
 
 # Backward-compatible alias
 _parse_and_validate_resume_state = _parse_and_validate_resume_status
+
+
+def clean_session_state(
+    config_file: str | Path | Config | None = None,
+    log_dir: str | Path | None = None,
+) -> bool:
+    """Removes saved status file and any related temporary session/progress files.
+
+    Args:
+        config_file: Optional config file path or Config instance.
+        log_dir: Optional log directory. If not specified and config_file is a Config,
+            uses config_file.settings.log_dir; otherwise defaults to 'logs'.
+
+    Returns:
+        True if any state file was removed, False if no state files were found.
+    """
+    actual_config_file: str | Path | None = None
+    if isinstance(config_file, Config):
+        if log_dir is None:
+            log_dir = config_file.settings.log_dir
+    else:
+        actual_config_file = config_file
+
+    if log_dir is None:
+        log_dir = "logs"
+
+    log_path = Path(log_dir)
+    status_path = resolve_status_path(log_path, actual_config_file)
+
+    removed_any = False
+
+    # 1. Remove the primary status file
+    if status_path.is_file():
+        try:
+            status_path.unlink()
+            removed_any = True
+        except OSError:
+            pass
+
+    # 2. Check fallback legacy state file if status_path was the default lbs_status.json
+    if status_path.name == "lbs_status.json" and status_path.parent.is_dir():
+        legacy_path = status_path.parent / "lbs_state.json"
+        if legacy_path.is_file():
+            try:
+                legacy_path.unlink()
+                removed_any = True
+            except OSError:
+                pass
+
+    # 3. Clean profile-scoped temporary status files in status_path.parent
+    if status_path.parent.is_dir():
+        if status_path.name != "lbs_status.json":
+            patterns = [
+                f"{status_path.stem}_*.tmp",
+                f"{status_path.stem}_reconcile_*.tmp",
+            ]
+        else:
+            patterns = [
+                "lbs_status_default_*.tmp",
+                "lbs_status_default_reconcile_*.tmp",
+                "lbs_status_reconcile_*.tmp",
+            ]
+
+        for pattern in patterns:
+            for p in status_path.parent.glob(pattern):
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        removed_any = True
+                    except OSError:
+                        pass
+
+    return removed_any
 
 
 def _find_matching_saved_command(
@@ -1782,6 +1865,15 @@ class Scheduler:
     """Orchestrates execution of job queues, phase filtering, and logging."""
 
     @staticmethod
+    def clean(
+        config_path: str | Path | None = None,
+        log_dir: str | Path | None = None,
+        config: Config | None = None,
+    ) -> bool:
+        """Removes saved status file and any related temporary session/progress files."""
+        return clean_session_state(config_file=config_path or config, log_dir=log_dir)
+
+    @staticmethod
     def run(
         config: Config,
         job_filter: list[str] | str | None = None,
@@ -1790,6 +1882,7 @@ class Scheduler:
         resume: str | None = None,
         config_path: str | Path | None = None,
         mode: str = "phased",
+        fresh: bool = False,
     ) -> bool:
         """
         Main execution loop for LBS jobs.
@@ -1802,6 +1895,9 @@ class Scheduler:
         If phase_filter is specified, only executes phases with names in the filter.
         Raises ValueError if filters contain invalid job or phase names.
         """
+        if fresh and resume:
+            raise ValueError("Cannot specify both 'fresh' and 'resume'.")
+
         session_start_time = time.perf_counter()
         jobs_to_run, phases_to_run = _resolve_execution_filters(config, job_filter, phase_filter)
 
@@ -1843,6 +1939,9 @@ class Scheduler:
 
         lock_path = log_dir / "lbs.lock"
         with FileLock(lock_path):
+            if fresh:
+                clean_session_state(config_file=config_path, log_dir=config.settings.log_dir)
+
             if resume == "latest":
                 if session_date is None:
                     session_date = datetime.datetime.now().strftime("%Y-%m-%d")

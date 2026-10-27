@@ -7,14 +7,17 @@ lbs.cli – Command-line interface for the Local Builds Scheduler.
 Entry point: lbs.cli:main
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+from pathlib import Path
 import subprocess
 import sys
 
-from lbs import __version__, Scheduler
+from lbs import __version__, Scheduler, clean_session_state
 from lbs.config import load_config, resolve_status_path, Config, ConfigError
-from lbs.utils.lock import LockError
+from lbs.utils.lock import FileLock, LockError
 
 
 def trigger_os_shutdown() -> None:
@@ -114,6 +117,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             resume=getattr(args, "resume", None),
             config_path=args.config,
             mode=getattr(args, "mode", "phased"),
+            fresh=getattr(args, "fresh", False),
         )
         if getattr(args, "shutdown", False):
             if getattr(args, "dry_run", False):
@@ -132,7 +136,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(2)
     except ValueError as e:
         if (getattr(args, "job", None) or getattr(args, "phase", None)
-                or getattr(args, "resume", None)):
+                or getattr(args, "resume", None)
+                or getattr(args, "fresh", False)):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
         raise
@@ -166,6 +171,36 @@ def cmd_list(args: argparse.Namespace) -> None:
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
+
+
+def cmd_clean(args: argparse.Namespace) -> None:
+    """Handle the 'lbs clean <config>' subcommand."""
+    try:
+        config = load_config(args.config)
+        log_dir = config.settings.log_dir
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    log_path = Path(log_dir)
+    lock_path = log_path / "lbs.lock"
+    try:
+        if log_path.is_dir():
+            with FileLock(lock_path):
+                cleaned = clean_session_state(
+                    config_file=args.config, log_dir=log_dir)
+        else:
+            cleaned = clean_session_state(
+                config_file=args.config, log_dir=log_dir)
+    except LockError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if cleaned:
+        print(f"Cleared saved session state for {args.config}.")
+    else:
+        print(f"No saved session state found for {args.config}. Nothing to clean.")
+    sys.exit(0)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -234,11 +269,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate and print the execution plan without running commands.",
     )
-    run_parser.add_argument(
+    resume_group = run_parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
         choices=["latest"],
         help=
         "Resume a failed or interrupted session. Currently supports 'latest'.",
+    )
+    resume_group.add_argument(
+        "--fresh",
+        "--ignore-saved-state",
+        dest="fresh",
+        action="store_true",
+        help=
+        "Discard any existing saved session state and start all jobs from the beginning.",
     )
     run_parser.set_defaults(func=cmd_run)
 
@@ -258,6 +302,14 @@ def build_parser() -> argparse.ArgumentParser:
         "list", help="List jobs defined in a config file.")
     list_parser.add_argument("config", help="Path to the YAML config file.")
     list_parser.set_defaults(func=cmd_list)
+
+    # lbs clean <config>
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Clean saved session state and temporary files for a config.",
+    )
+    clean_parser.add_argument("config", help="Path to the YAML config file.")
+    clean_parser.set_defaults(func=cmd_clean)
 
     return parser
 

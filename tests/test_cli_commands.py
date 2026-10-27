@@ -664,3 +664,265 @@ def test_cli_run_quiet_flag(tmp_path):
         assert config_passed.settings.verbose is False
         assert config_passed.settings.quiet is True
 
+
+def test_cli_clean_existing_state(tmp_path):
+    """Running 'lbs clean <config>' removes saved session state and temporary files."""
+    config_file = tmp_path / "build.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    status_file = log_dir / "lbs_status_build.json"
+    status_file.write_text('{"jobs": {}}', encoding="utf-8")
+    tmp_file = log_dir / "lbs_status_build_123.tmp"
+    tmp_file.write_text("temp", encoding="utf-8")
+    reconcile_tmp = log_dir / "lbs_status_build_reconcile_456.tmp"
+    reconcile_tmp.write_text("reconcile", encoding="utf-8")
+
+    # Another profile's files in the same log directory
+    other_status = log_dir / "lbs_status_other.json"
+    other_status.write_text('{"jobs": {}}', encoding="utf-8")
+    other_tmp = log_dir / "lbs_status_other_789.tmp"
+    other_tmp.write_text("other temp", encoding="utf-8")
+    other_reconcile = log_dir / "lbs_status_other_reconcile_012.tmp"
+    other_reconcile.write_text("other reconcile", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "clean", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert f"Cleared saved session state for {config_file}." in result.stdout
+    # Target profile files are deleted
+    assert not status_file.exists()
+    assert not tmp_file.exists()
+    assert not reconcile_tmp.exists()
+    # Other profile files remain untouched
+    assert other_status.exists()
+    assert other_tmp.exists()
+    assert other_reconcile.exists()
+
+
+def test_cli_clean_nonexistent_state(tmp_path):
+    """Running 'lbs clean <config>' when no state exists prints a clean message."""
+    config_file = tmp_path / "clean_empty.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "clean", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert f"No saved session state found for {config_file}. Nothing to clean." in result.stdout
+
+
+def test_cli_clean_invalid_config(tmp_path):
+    """Running 'lbs clean <config>' on invalid config exits with code 2."""
+    missing_file = tmp_path / "nonexistent.yaml"
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "clean", str(missing_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "Error:" in result.stderr
+
+
+def test_cli_clean_locked(tmp_path):
+    """Running 'lbs clean' while another instance holds the lock exits with code 2."""
+    from lbs.utils.lock import FileLock
+
+    config_file = tmp_path / "locked.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+    status_file = log_dir / "lbs_status_locked.json"
+    status_file.write_text('{"jobs": {}}', encoding="utf-8")
+
+    lock_file = log_dir / "lbs.lock"
+    with FileLock(lock_file):
+        result = subprocess.run(
+            [sys.executable, "-m", "lbs", "clean", str(config_file)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 2
+        assert "Another Local Builds Scheduler instance is already running" in result.stderr
+    assert status_file.exists()
+
+
+def test_cli_run_fresh_flag(tmp_path):
+    """Running 'lbs run --fresh' discards previous state and starts all jobs from beginning."""
+    config_file = tmp_path / "fresh_test.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    marker_file = tmp_path / "job1_executed_count.txt"
+    py_script = f"""import sys
+with open(r'{marker_file.as_posix()}', 'a') as f:
+    f.write('1\\n')
+"""
+    script_path = tmp_path / "record.py"
+    script_path.write_text(py_script, encoding="utf-8")
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+            "stop_on_failure": True,
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" "{script_path}"'],
+            },
+            {
+                "name": "job-2",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    # 1. First run: job-1 passes, job-2 fails
+    res1 = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res1.returncode == 1
+    assert marker_file.read_text().splitlines() == ["1"]
+
+    # If we resume, job-1 should be skipped
+    res_resume = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--resume", "latest"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res_resume.returncode == 1
+    # marker_file should still have 1 entry (job-1 was skipped on resume)
+    assert marker_file.read_text().splitlines() == ["1"]
+
+    # 2. Run with --fresh: job-1 must execute again from the start
+    res2 = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--fresh"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res2.returncode == 1
+    assert marker_file.read_text().splitlines() == ["1", "1"]
+
+
+def test_cli_run_ignore_saved_state_alias(tmp_path):
+    """Running 'lbs run --ignore-saved-state' works as an alias for --fresh."""
+    config_file = tmp_path / "fresh_alias.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    marker_file = tmp_path / "job1_alias_count.txt"
+    py_script = f"""import sys
+with open(r'{marker_file.as_posix()}', 'a') as f:
+    f.write('1\\n')
+"""
+    script_path = tmp_path / "record_alias.py"
+    script_path.write_text(py_script, encoding="utf-8")
+
+    config_data = {
+        "settings": {
+            "log_dir": str(log_dir),
+            "stop_on_failure": True,
+        },
+        "jobs": [
+            {
+                "name": "job-1",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" "{script_path}"'],
+            },
+            {
+                "name": "job-2",
+                "cwd": str(workspace_dir),
+                "commands": [f'"{sys.executable}" -c "import sys; sys.exit(1)"'],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    # 1. First run: job-1 passes, job-2 fails
+    subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert marker_file.read_text().splitlines() == ["1"]
+
+    # 2. Run with --ignore-saved-state
+    res = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--ignore-saved-state"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res.returncode == 1
+    assert marker_file.read_text().splitlines() == ["1", "1"]
+
+
+def test_cli_run_fresh_and_resume_mutually_exclusive(tmp_path):
+    """Passing both --resume and --fresh exits with error code 2."""
+    config_file = tmp_path / "conflict.yaml"
+    config_file.write_text("jobs: []", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "--resume", "latest", "--fresh"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "not allowed with argument" in result.stderr or "mutually exclusive" in result.stderr
