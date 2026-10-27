@@ -259,6 +259,31 @@ This reads the saved status file and:
 3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
 4. If all selected jobs had already succeeded, it outputs a status message and exits immediately.
 
+### Inspecting Build Queue State (`lbs status`)
+
+To check the exact state of an overnight, interrupted, or completed build without executing any commands or altering saved state:
+```bash
+lbs status config.yaml
+```
+Output:
+```
+LBS Session Status: config.yaml
+Profile State: logs/lbs_status_config.json
+Session Started: 2026-10-22 23:15:00 | Last Updated: 2026-10-23 01:42:10
+Outcome: FAILED (Halted on job 'chromium-debug', phase 'compile')
+
+Jobs:
+  [PASS] chromium-release    (sync: DONE, compile: DONE)           took 01:45:12
+  [FAIL] chromium-debug      (sync: DONE, compile: FAILED at cmd 3) took 00:42:01
+  [SKIP] package-artifacts   (not started, aborted by failure)     (-)
+  [OFF]  upload-symbols      (disabled: build_it is false)         (-)
+
+Action:
+  To resume from the failed step, run:
+    lbs run config.yaml --resume latest
+```
+Pass `--json` for machine-readable JSON output in CI or automated pipelines.
+
 ### Discarding Stale Resume State (`--fresh` and `lbs clean`)
 
 When an earlier run was aborted, corrupted, or you wish to re-run the entire build pipeline from scratch:
