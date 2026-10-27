@@ -5,6 +5,9 @@
 lbs.utils.executor – Command execution engine with live output streaming and metadata capture.
 """
 
+from __future__ import annotations
+
+from contextlib import nullcontext
 from dataclasses import dataclass
 import datetime
 import os
@@ -77,8 +80,24 @@ class CommandResult:
 class JobExecutor:
     """Executes build commands sequentially, streams live output, and captures metadata."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(
+        self,
+        verbose: bool = False,
+        stream_lock=None,
+    ):
         self.verbose = verbose
+        self.stream_lock = stream_lock
+
+    def _write_stdout(self, text: str) -> None:
+        if self.verbose:
+            with self.stream_lock if self.stream_lock is not None else nullcontext():
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
+    def _write_stderr_error(self, message: str) -> None:
+        if self.verbose:
+            with self.stream_lock if self.stream_lock is not None else nullcontext():
+                print(f"[ERROR] {message}", file=sys.stderr)
 
     def run_command(
         self,
@@ -189,9 +208,7 @@ class JobExecutor:
                         log_file.write(decoded_line)
                         log_file.flush()
 
-                    if self.verbose:
-                        sys.stdout.write(decoded_line)
-                        sys.stdout.flush()
+                    self._write_stdout(decoded_line)
 
                 if timed_out:
                     _terminate_process(process)
@@ -211,8 +228,7 @@ class JobExecutor:
                     if log_file:
                         log_file.write(f"[ERROR] {error_message}\n")
                         log_file.flush()
-                    if self.verbose:
-                        print(f"[ERROR] {error_message}", file=sys.stderr)
+                    self._write_stderr_error(error_message)
                     exit_code = None
                     success = False
                 else:
@@ -230,9 +246,7 @@ class JobExecutor:
                         if log_file:
                             log_file.write(decoded_line)
                             log_file.flush()
-                        if self.verbose:
-                            sys.stdout.write(decoded_line)
-                            sys.stdout.flush()
+                        self._write_stdout(decoded_line)
 
                     process.wait()
                     exit_code = process.returncode
@@ -250,8 +264,7 @@ class JobExecutor:
                         if log_file:
                             log_file.write(f"[ERROR] {error_message}\n")
                             log_file.flush()
-                        if self.verbose:
-                            print(f"[ERROR] {error_message}", file=sys.stderr)
+                        self._write_stderr_error(error_message)
                         exit_code = None
                         success = False
                 else:
@@ -276,24 +289,21 @@ class JobExecutor:
             if log_file:
                 log_file.write(f"[ERROR] {error_message}\n")
                 log_file.flush()
-            if self.verbose:
-                print(f"[ERROR] {error_message}", file=sys.stderr)
+            self._write_stderr_error(error_message)
 
         except OSError as e:
             error_message = f"Failed to launch shell command: {e}"
             if log_file:
                 log_file.write(f"[ERROR] {error_message}\n")
                 log_file.flush()
-            if self.verbose:
-                print(f"[ERROR] {error_message}", file=sys.stderr)
+            self._write_stderr_error(error_message)
 
         except Exception as e:
             error_message = f"Unexpected execution error: {e}"
             if log_file:
                 log_file.write(f"[ERROR] {error_message}\n")
                 log_file.flush()
-            if self.verbose:
-                print(f"[ERROR] {error_message}", file=sys.stderr)
+            self._write_stderr_error(error_message)
 
         t_end = time.perf_counter()
         end_time = datetime.datetime.now()

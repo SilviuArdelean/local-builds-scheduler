@@ -919,3 +919,236 @@ def test_queue_progress_reporter_split_screen_disabled_in_quiet_and_non_tty():
     )
     reporter2.enable_split_screen()
     assert reporter2.split_active is False
+
+
+def test_queue_progress_reporter_multiphase_failed_then_passed_not_counted_twice():
+    """Remark 1: When earlier phase fails and later phase succeeds with stop_on_failure=False,
+    job is counted once as failed and NOT counted in completed_jobs.
+    """
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream,
+        force_tty=True,
+    )
+
+    # Job 1, phase 1 fails (not last phase)
+    reporter.end_phase(
+        job_name="job-1",
+        phase_name="build",
+        success=False,
+        duration=10.0,
+        is_last_phase=False,
+    )
+    # At this point, job-1 has not finished its phases yet
+    assert reporter.completed_jobs == 0
+    assert reporter.failed_jobs_count == 0
+
+    # Job 1, phase 2 succeeds (is last phase)
+    reporter.end_phase(
+        job_name="job-1",
+        phase_name="test",
+        success=True,
+        duration=5.0,
+        is_last_phase=True,
+    )
+    # Because phase 1 failed, job-1 must be classified as failed, NOT passed
+    assert reporter.failed_jobs_count == 1
+    assert reporter.completed_jobs == 0
+
+    # Remaining jobs count calculation: total_jobs - completed_jobs - failed_jobs_count
+    remaining = reporter.total_jobs - reporter.completed_jobs - reporter.failed_jobs_count
+    assert remaining == 1
+
+    # Job 2, phase 1 succeeds, phase 2 succeeds
+    reporter.end_phase(
+        job_name="job-2",
+        phase_name="build",
+        success=True,
+        duration=10.0,
+        is_last_phase=False,
+    )
+    assert reporter.completed_jobs == 0
+    assert reporter.failed_jobs_count == 1
+
+    reporter.end_phase(
+        job_name="job-2",
+        phase_name="test",
+        success=True,
+        duration=5.0,
+        is_last_phase=True,
+    )
+    assert reporter.completed_jobs == 1
+    assert reporter.failed_jobs_count == 1
+    remaining = reporter.total_jobs - reporter.completed_jobs - reporter.failed_jobs_count
+    assert remaining == 0
+
+
+def test_queue_progress_reporter_multiphase_all_fail_counted_once():
+    """Remark 1: When multiple phases of a single job fail, job is counted as failed once."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=3,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=stream,
+        force_tty=True,
+    )
+
+    reporter.end_phase(
+        job_name="job-fail",
+        phase_name="phase1",
+        success=False,
+        duration=2.0,
+        is_last_phase=False,
+    )
+    reporter.end_phase(
+        job_name="job-fail",
+        phase_name="phase2",
+        success=False,
+        duration=2.0,
+        is_last_phase=False,
+    )
+    reporter.end_phase(
+        job_name="job-fail",
+        phase_name="phase3",
+        success=False,
+        duration=2.0,
+        is_last_phase=True,
+    )
+
+    assert reporter.failed_jobs_count == 1
+    assert reporter.completed_jobs == 0
+
+
+def test_queue_progress_reporter_stream_lock_synchronization():
+    """Remark 2: Verify that progress reporter guards stream output with an RLock."""
+    import io
+    import threading
+    from unittest.mock import MagicMock
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    mock_lock = MagicMock(spec=threading.RLock())
+    mock_lock.__enter__.return_value = None
+    mock_lock.__exit__.return_value = None
+
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=2,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+        lock=mock_lock,
+    )
+
+    # Calling start_phase / render_split_dashboard should acquire the lock
+    job = Job(name="test-job", cwd=".")
+    tasks = [CommandTask(index=0, phase="build", command="echo 1")]
+    reporter.enable_split_screen()
+    assert mock_lock.__enter__.called
+
+    mock_lock.reset_mock()
+    reporter.on_command_update({"test-job": tasks})
+    assert mock_lock.__enter__.called
+
+    mock_lock.reset_mock()
+    reporter.end_phase("test-job", "build", True, 1.0, True)
+    assert mock_lock.__enter__.called
+
+
+def test_queue_progress_reporter_scheduled_tasks_progress_on_resume():
+    """Remark 3: When resuming, progress percent and command counts reflect only scheduled tasks
+    and are not pinned at 100% due to previously-completed tasks across job_command_tasks.
+    """
+    import io
+    from lbs.runner import _QueueProgressReporter, CommandTask
+    from lbs.config import Job, BuildStatus
+
+    stream = io.StringIO()
+
+    # Pre-existing tasks from previous run:
+    # job-1 was fully DONE (2 tasks)
+    job1_tasks = [
+        CommandTask(index=0, phase="default", command="cmd1-1", status=BuildStatus.DONE),
+        CommandTask(index=1, phase="default", command="cmd1-2", status=BuildStatus.DONE),
+    ]
+    # job-2 had task 0 DONE, but tasks 1 and 2 need to run in this session
+    job2_task0 = CommandTask(index=0, phase="default", command="cmd2-0", status=BuildStatus.DONE)
+    job2_task1 = CommandTask(index=1, phase="default", command="cmd2-1", status=BuildStatus.PENDING)
+    job2_task2 = CommandTask(index=2, phase="default", command="cmd2-2", status=BuildStatus.PENDING)
+    job2_all_tasks = [job2_task0, job2_task1, job2_task2]
+
+    # Only the 2 pending tasks are scheduled to run in this resume session
+    scheduled_tasks = [job2_task1, job2_task2]
+
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=len(scheduled_tasks),
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+        scheduled_tasks=scheduled_tasks,
+    )
+
+    all_command_tasks = {
+        "job-1": job1_tasks,
+        "job-2": job2_all_tasks,
+    }
+
+    job2 = Job(name="job-2", cwd=".")
+    reporter.start_phase(
+        job=job2,
+        phase_name="default",
+        cmds_to_run_tasks=scheduled_tasks,
+        log_path="logs/job-2.log",
+        job_idx=1,
+    )
+
+    # Initial state: 0 completed out of 2 scheduled tasks -> 0% progress
+    assert reporter._get_progress_percent() == 0
+    assert reporter.current_cmd_idx == 1
+    assert reporter.current_phase_cmd_total == 2
+
+    # Task 1 starts running
+    job2_task1.status = BuildStatus.RUNNING
+    reporter.on_command_update(all_command_tasks)
+    # Still 0 completed out of 2 -> 0%
+    assert reporter._get_progress_percent() == 0
+    assert reporter.current_cmd_idx == 1
+    assert reporter.current_phase_cmd_total == 2
+
+    # Task 1 finishes DONE
+    job2_task1.status = BuildStatus.DONE
+    reporter.on_command_update(all_command_tasks)
+    # 1 of 2 completed -> 50% progress (NOT pinned to 100%!)
+    assert reporter.completed_commands == 1
+    assert reporter._get_progress_percent() == 50
+    assert reporter.current_cmd_idx == 2
+
+    # Task 2 starts running
+    job2_task2.status = BuildStatus.RUNNING
+    reporter.on_command_update(all_command_tasks)
+    assert reporter._get_progress_percent() == 50
+    assert reporter.current_cmd_idx == 2
+
+    # Task 2 finishes DONE
+    job2_task2.status = BuildStatus.DONE
+    reporter.on_command_update(all_command_tasks)
+    # 2 of 2 completed -> 100% progress
+    assert reporter.completed_commands == 2
+    assert reporter._get_progress_percent() == 100
+
+

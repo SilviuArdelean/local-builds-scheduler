@@ -5,7 +5,10 @@
 lbs.runner – Sequential job execution and logging.
 """
 
+from __future__ import annotations
+
 import atexit
+from contextlib import nullcontext
 from dataclasses import dataclass
 import datetime
 import hashlib
@@ -743,8 +746,9 @@ def _execute_job_attempt(
             log_to_job(f"Environment overlays: {job.env}")
 
         if verbose:
-            sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
-            sys.stdout.flush()
+            with progress_reporter.lock if progress_reporter is not None else nullcontext():
+                sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
+                sys.stdout.flush()
 
         is_win = sys.platform == "win32"
         suffix = ".bat" if is_win else ".sh"
@@ -767,7 +771,10 @@ def _execute_job_attempt(
                 monitor = _JobProgressMonitor(tasks, progress_path, on_status_change)
                 monitor.start()
 
-            executor = JobExecutor(verbose=verbose)
+            executor = JobExecutor(
+                verbose=verbose,
+                stream_lock=progress_reporter.lock if progress_reporter is not None else None,
+            )
             run_cmd = f'"{temp_script_path.resolve()}"' if is_win else f'sh "{temp_script_path.resolve()}"'
             timeout_sec = job.command_timeout_minutes * 60 if job.command_timeout_minutes is not None else None
 
@@ -1082,6 +1089,8 @@ class _QueueProgressReporter:
         is_quiet: bool,
         stream=None,
         force_tty: bool | None = None,
+        lock=None,
+        scheduled_tasks: list[CommandTask] | None = None,
     ) -> None:
         self.total_jobs = max(1, total_jobs)
         self.total_commands = max(0, total_commands)
@@ -1092,9 +1101,14 @@ class _QueueProgressReporter:
             self.is_tty = force_tty
         else:
             self.is_tty = getattr(self.stream, "isatty", lambda: False)()
+        self.lock = lock if lock is not None else threading.RLock()
+        self.scheduled_tasks = scheduled_tasks
+        self.current_phase_tasks: list[CommandTask] | None = None
 
         self.completed_jobs = 0
         self.failed_jobs_count = 0
+        self._failed_job_names: set[str] = set()
+        self._finished_jobs: set[str] = set()
         self.completed_commands = 0
         self.current_job_name = ""
         self.current_job_idx = 0
@@ -1122,44 +1136,46 @@ class _QueueProgressReporter:
                 pass
 
     def enable_split_screen(self) -> None:
-        if not self.is_tty or self.is_quiet or self.split_active:
-            return
-        term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-        if term_lines < 12:
-            return
+        with self.lock:
+            if not self.is_tty or self.is_quiet or self.split_active:
+                return
+            term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
+            if term_lines < 12:
+                return
 
-        self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
-        self.scroll_end = term_lines - self.status_lines_count
-        self.status_start = self.scroll_end + 1
-        self.last_term_lines = term_lines
-        self.split_active = True
+            self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
+            self.scroll_end = term_lines - self.status_lines_count
+            self.status_start = self.scroll_end + 1
+            self.last_term_lines = term_lines
+            self.split_active = True
 
-        if sys.platform == "win32":
-            try:
-                os.system("")
-            except Exception:
-                pass
+            if sys.platform == "win32":
+                try:
+                    os.system("")
+                except Exception:
+                    pass
 
-        # Set top scrolling margin
-        self.stream.write(f"\033[1;{self.scroll_end}r")
-        self.stream.write("\033[1;1H")
-        self.stream.flush()
-        self.render_split_dashboard()
+            # Set top scrolling margin
+            self.stream.write(f"\033[1;{self.scroll_end}r")
+            self.stream.write("\033[1;1H")
+            self.stream.flush()
+            self.render_split_dashboard()
 
     def disable_split_screen(self) -> None:
-        if not self.split_active:
-            return
-        try:
-            # Reset scrolling margins to full terminal height
-            self.stream.write("\033[r")
-            _, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-            # Move cursor to bottom row and ensure visible
-            self.stream.write(f"\033[{term_lines};1H\033[?25h\n")
-            self.stream.flush()
-        except Exception:
-            pass
-        finally:
-            self.split_active = False
+        with self.lock:
+            if not self.split_active:
+                return
+            try:
+                # Reset scrolling margins to full terminal height
+                self.stream.write("\033[r")
+                _, term_lines = shutil.get_terminal_size(fallback=(80, 24))
+                # Move cursor to bottom row and ensure visible
+                self.stream.write(f"\033[{term_lines};1H\033[?25h\n")
+                self.stream.flush()
+            except Exception:
+                pass
+            finally:
+                self.split_active = False
 
     def _get_elapsed_str(self) -> str:
         elapsed = int(time.perf_counter() - self.session_start_time)
@@ -1183,159 +1199,164 @@ class _QueueProgressReporter:
             return "#", "-", "="
 
     def update_window_title(self, title: str) -> None:
-        if not self.is_tty:
-            return
-        try:
-            self.stream.write(f"\033]0;{title}\007")
-            self.stream.flush()
-        except (OSError, UnicodeEncodeError):
-            pass
+        with self.lock:
+            if not self.is_tty:
+                return
+            try:
+                self.stream.write(f"\033]0;{title}\007")
+                self.stream.flush()
+            except (OSError, UnicodeEncodeError):
+                pass
 
     def render_quiet_bar(self) -> None:
-        if not self.is_quiet or not self.is_tty:
-            return
+        with self.lock:
+            if not self.is_quiet or not self.is_tty:
+                return
 
-        fill_ch, empty_ch, _ = self._safe_chars()
-        pct = self._get_progress_percent()
-        elapsed_str = self._get_elapsed_str()
+            fill_ch, empty_ch, _ = self._safe_chars()
+            pct = self._get_progress_percent()
+            elapsed_str = self._get_elapsed_str()
 
-        term_cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+            term_cols = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-        if term_cols >= 100:
-            bar_width = 20
-            phase_display = f"phase: {self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
-            cmd_display = f"cmd {self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
-        elif term_cols >= 80:
-            bar_width = 10
-            phase_display = f"{self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
-            cmd_display = f"{self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
-        else:
-            bar_width = 6
-            phase_display = f"{self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
-            cmd_display = f"{self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
+            if term_cols >= 100:
+                bar_width = 20
+                phase_display = f"phase: {self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
+                cmd_display = f"cmd {self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
+            elif term_cols >= 80:
+                bar_width = 10
+                phase_display = f"{self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
+                cmd_display = f"{self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
+            else:
+                bar_width = 6
+                phase_display = f"{self.current_phase_name}, " if self.current_phase_name and self.current_phase_name != "default" else ""
+                cmd_display = f"{self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
 
-        retry_display = f", retry {self.current_retry_attempt - 1}/{self.current_max_retries}" if self.current_retry_attempt > 1 else ""
+            retry_display = f", retry {self.current_retry_attempt - 1}/{self.current_max_retries}" if self.current_retry_attempt > 1 else ""
 
-        detail = f"({phase_display}{cmd_display}{retry_display})"
-        detail_part = f" {detail}" if detail != "()" else ""
+            detail = f"({phase_display}{cmd_display}{retry_display})"
+            detail_part = f" {detail}" if detail != "()" else ""
 
-        filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
-        bar = fill_ch * filled + empty_ch * (bar_width - filled)
+            filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
+            bar = fill_ch * filled + empty_ch * (bar_width - filled)
 
-        prefix = f"[LBS] [{bar}] {pct}% [{self.current_job_idx}/{self.total_jobs}]"
-        suffix = f"Elapsed: {elapsed_str}"
-        middle = f"'{self.current_job_name}'{detail_part}"
+            prefix = f"[LBS] [{bar}] {pct}% [{self.current_job_idx}/{self.total_jobs}]"
+            suffix = f"Elapsed: {elapsed_str}"
+            middle = f"'{self.current_job_name}'{detail_part}"
 
-        # Fit middle dynamically without truncating bar or elapsed time
-        avail = term_cols - len(prefix) - len(suffix) - 7  # 7 for " | " and " | " plus margin
-        if avail > 8 and len(middle) > avail:
-            middle = middle[:avail - 3] + "..."
+            # Fit middle dynamically without truncating bar or elapsed time
+            avail = term_cols - len(prefix) - len(suffix) - 7  # 7 for " | " and " | " plus margin
+            if avail > 8 and len(middle) > avail:
+                middle = middle[:avail - 3] + "..."
 
-        line = f"{prefix} | {middle} | {suffix}"
-        if len(line) >= term_cols:
-            line = line[:term_cols - 1]
+            line = f"{prefix} | {middle} | {suffix}"
+            if len(line) >= term_cols:
+                line = line[:term_cols - 1]
 
-        pad = max(0, self.last_rendered_len - len(line))
-        self.stream.write(f"\r{line}{' ' * pad}")
-        self.stream.flush()
-        self.last_rendered_len = len(line)
-        self.active_bar_active = True
+            pad = max(0, self.last_rendered_len - len(line))
+            self.stream.write(f"\r{line}{' ' * pad}")
+            self.stream.flush()
+            self.last_rendered_len = len(line)
+            self.active_bar_active = True
 
     def clear_quiet_bar(self) -> None:
-        if self.is_quiet and self.is_tty and self.active_bar_active:
-            self.stream.write(f"\r{' ' * self.last_rendered_len}\r")
-            self.stream.flush()
-            self.last_rendered_len = 0
-            self.active_bar_active = False
+        with self.lock:
+            if self.is_quiet and self.is_tty and self.active_bar_active:
+                self.stream.write(f"\r{' ' * self.last_rendered_len}\r")
+                self.stream.flush()
+                self.last_rendered_len = 0
+                self.active_bar_active = False
 
     def render_split_dashboard(self) -> None:
-        if not self.split_active or not self.is_tty or self.is_quiet:
-            return
+        with self.lock:
+            if not self.split_active or not self.is_tty or self.is_quiet:
+                return
 
-        term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-        # Handle dynamic terminal resize
-        if term_lines != getattr(self, "last_term_lines", term_lines):
-            self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
-            self.scroll_end = term_lines - self.status_lines_count
-            self.status_start = self.scroll_end + 1
-            self.last_term_lines = term_lines
-            self.stream.write(f"\033[1;{self.scroll_end}r")
+            term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
+            # Handle dynamic terminal resize
+            if term_lines != getattr(self, "last_term_lines", term_lines):
+                self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
+                self.scroll_end = term_lines - self.status_lines_count
+                self.status_start = self.scroll_end + 1
+                self.last_term_lines = term_lines
+                self.stream.write(f"\033[1;{self.scroll_end}r")
 
-        fill_ch, empty_ch, div_ch = self._safe_chars()
-        pct = self._get_progress_percent()
-        elapsed_str = self._get_elapsed_str()
+            fill_ch, empty_ch, div_ch = self._safe_chars()
+            pct = self._get_progress_percent()
+            elapsed_str = self._get_elapsed_str()
 
-        bar_width = min(20, max(8, term_cols - 45))
-        filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
-        bar = fill_ch * filled + empty_ch * (bar_width - filled)
+            bar_width = min(20, max(8, term_cols - 45))
+            filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
+            bar = fill_ch * filled + empty_ch * (bar_width - filled)
 
-        phase_part = f" (phase '{self.current_phase_name}')" if self.current_phase_name and self.current_phase_name != "default" else ""
-        cmd_part = f"[{self.current_cmd_idx}/{self.current_phase_cmd_total}]" if self.current_phase_cmd_total > 0 else ""
-        cmd_text = self.current_command_text.strip() if self.current_command_text else ""
-        avail_cmd = max(10, term_cols - 25)
-        if len(cmd_text) > avail_cmd:
-            cmd_text = cmd_text[:avail_cmd - 3] + "..."
+            phase_part = f" (phase '{self.current_phase_name}')" if self.current_phase_name and self.current_phase_name != "default" else ""
+            cmd_part = f"[{self.current_cmd_idx}/{self.current_phase_cmd_total}]" if self.current_phase_cmd_total > 0 else ""
+            cmd_text = self.current_command_text.strip() if self.current_command_text else ""
+            avail_cmd = max(10, term_cols - 25)
+            if len(cmd_text) > avail_cmd:
+                cmd_text = cmd_text[:avail_cmd - 3] + "..."
 
-        divider_line = f"[LBS] {div_ch * max(10, term_cols - 7)}"
-        bar_line = f"[LBS] [{bar}] {pct}% [{self.current_job_idx}/{self.total_jobs}] | '{self.current_job_name}'{phase_part}"
-        cmd_line = f"[LBS] Active: {cmd_part} {cmd_text}".rstrip()
-        remaining_cnt = max(0, self.total_jobs - self.completed_jobs - self.failed_jobs_count)
-        stats_line = f"[LBS] Elapsed: {elapsed_str} | Queue: {self.completed_jobs} passed, {self.failed_jobs_count} failed | Remaining: {remaining_cnt}"
-        log_line = f"[LBS] Active log: {self.current_log_path}" if self.current_log_path else ""
+            divider_line = f"[LBS] {div_ch * max(10, term_cols - 7)}"
+            bar_line = f"[LBS] [{bar}] {pct}% [{self.current_job_idx}/{self.total_jobs}] | '{self.current_job_name}'{phase_part}"
+            cmd_line = f"[LBS] Active: {cmd_part} {cmd_text}".rstrip()
+            remaining_cnt = max(0, self.total_jobs - self.completed_jobs - self.failed_jobs_count)
+            stats_line = f"[LBS] Elapsed: {elapsed_str} | Queue: {self.completed_jobs} passed, {self.failed_jobs_count} failed | Remaining: {remaining_cnt}"
+            log_line = f"[LBS] Active log: {self.current_log_path}" if self.current_log_path else ""
 
-        dashboard_lines = [
-            divider_line,
-            bar_line,
-            cmd_line,
-            stats_line,
-        ]
-        if self.status_lines_count >= 6 and log_line:
-            dashboard_lines.append(log_line)
-        if self.status_lines_count >= 7:
-            dashboard_lines.append(divider_line)
+            dashboard_lines = [
+                divider_line,
+                bar_line,
+                cmd_line,
+                stats_line,
+            ]
+            if self.status_lines_count >= 6 and log_line:
+                dashboard_lines.append(log_line)
+            if self.status_lines_count >= 7:
+                dashboard_lines.append(divider_line)
 
-        # Draw to the bottom region without touching the top scrolling area
-        # 1. Hide cursor, save cursor position (both ANSI \\033[s and DEC \\0337)
-        self.stream.write("\033[?25l\0337\033[s")
-        for idx, d_line in enumerate(dashboard_lines):
-            row = self.status_start + idx
-            if len(d_line) >= term_cols:
-                d_line = d_line[:term_cols - 1]
-            self.stream.write(f"\033[{row};1H\033[2K{d_line}")
+            # Draw to the bottom region without touching the top scrolling area
+            # 1. Hide cursor, save cursor position (both ANSI \033[s and DEC \0337)
+            self.stream.write("\033[?25l\0337\033[s")
+            for idx, d_line in enumerate(dashboard_lines):
+                row = self.status_start + idx
+                if len(d_line) >= term_cols:
+                    d_line = d_line[:term_cols - 1]
+                self.stream.write(f"\033[{row};1H\033[2K{d_line}")
 
-        # Clear any remaining lines in the status pane
-        for row in range(self.status_start + len(dashboard_lines), term_lines + 1):
-            self.stream.write(f"\033[{row};1H\033[2K")
+            # Clear any remaining lines in the status pane
+            for row in range(self.status_start + len(dashboard_lines), term_lines + 1):
+                self.stream.write(f"\033[{row};1H\033[2K")
 
-        # 2. Restore cursor back to the scrolling region (both ANSI \\033[u and DEC \\0338), show cursor
-        self.stream.write("\033[u\0338\033[?25h")
-        self.stream.flush()
+            # 2. Restore cursor back to the scrolling region (both ANSI \033[u and DEC \0338), show cursor
+            self.stream.write("\033[u\0338\033[?25h")
+            self.stream.flush()
 
     def print_milestone_divider(self, job: Job, phase_name: str, log_path: Path | str) -> None:
-        if self.is_quiet or self.split_active:
-            return
+        with self.lock:
+            if self.is_quiet or self.split_active:
+                return
 
-        fill_ch, empty_ch, div_ch = self._safe_chars()
-        pct = self._get_progress_percent()
-        bar_width = 16
-        filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
-        bar = fill_ch * filled + empty_ch * (bar_width - filled)
+            fill_ch, empty_ch, div_ch = self._safe_chars()
+            pct = self._get_progress_percent()
+            bar_width = 16
+            filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
+            bar = fill_ch * filled + empty_ch * (bar_width - filled)
 
-        phase_suffix = f" (phase: {phase_name})" if phase_name and phase_name != "default" else ""
-        divider_line = f"[LBS] {div_ch * 60}"
-        elapsed_str = self._get_elapsed_str()
+            phase_suffix = f" (phase: {phase_name})" if phase_name and phase_name != "default" else ""
+            divider_line = f"[LBS] {div_ch * 60}"
+            elapsed_str = self._get_elapsed_str()
 
-        lines = [
-            "",
-            divider_line,
-            f"[LBS] Queue Progress: [{bar}] {pct}% ({self.completed_jobs} of {self.total_jobs} jobs completed)",
-            f"[LBS] Now starting: '{job.name}'{phase_suffix}",
-            f"[LBS] Elapsed: {elapsed_str} | Active log: {log_path}",
-            divider_line,
-            "",
-        ]
-        self.stream.write("\n".join(lines))
-        self.stream.flush()
+            lines = [
+                "",
+                divider_line,
+                f"[LBS] Queue Progress: [{bar}] {pct}% ({self.completed_jobs} of {self.total_jobs} jobs completed)",
+                f"[LBS] Now starting: '{job.name}'{phase_suffix}",
+                f"[LBS] Elapsed: {elapsed_str} | Active log: {log_path}",
+                divider_line,
+                "",
+            ]
+            self.stream.write("\n".join(lines))
+            self.stream.flush()
 
     def start_phase(
         self,
@@ -1347,72 +1368,85 @@ class _QueueProgressReporter:
         attempt: int = 1,
         total_attempts: int = 1,
     ) -> None:
-        self.current_job_name = job.name
-        self.current_phase_name = phase_name
-        self.current_job_idx = job_idx
-        self.current_cmd_idx = 1 if cmds_to_run_tasks else 0
-        self.current_phase_cmd_total = len(cmds_to_run_tasks)
-        self.current_command_text = cmds_to_run_tasks[0].command if cmds_to_run_tasks else ""
-        self.current_log_path = str(log_path)
-        self.current_retry_attempt = attempt
-        self.current_max_retries = job.retries
+        with self.lock:
+            self.current_job_name = job.name
+            self.current_phase_name = phase_name
+            self.current_job_idx = job_idx
+            self.current_phase_tasks = cmds_to_run_tasks
+            self.current_cmd_idx = 1 if cmds_to_run_tasks else 0
+            self.current_phase_cmd_total = len(cmds_to_run_tasks)
+            self.current_command_text = cmds_to_run_tasks[0].command if cmds_to_run_tasks else ""
+            self.current_log_path = str(log_path)
+            self.current_retry_attempt = attempt
+            self.current_max_retries = job.retries
 
-        phase_part = f" ({phase_name})" if phase_name and phase_name != "default" else ""
-        title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {job.name}{phase_part}"
-        self.update_window_title(title)
+            phase_part = f" ({phase_name})" if phase_name and phase_name != "default" else ""
+            title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {job.name}{phase_part}"
+            self.update_window_title(title)
 
-        if not self.is_quiet:
-            if self.split_active:
-                self.render_split_dashboard()
+            if not self.is_quiet:
+                if self.split_active:
+                    self.render_split_dashboard()
+                else:
+                    self.print_milestone_divider(job, phase_name, log_path)
             else:
-                self.print_milestone_divider(job, phase_name, log_path)
-        else:
-            self.render_quiet_bar()
+                self.render_quiet_bar()
 
     def set_attempt(self, attempt: int, total_attempts: int) -> None:
-        self.current_retry_attempt = attempt
-        if self.is_quiet:
-            self.render_quiet_bar()
-        elif self.split_active:
-            self.render_split_dashboard()
+        with self.lock:
+            self.current_retry_attempt = attempt
+            if self.is_quiet:
+                self.render_quiet_bar()
+            elif self.split_active:
+                self.render_split_dashboard()
 
     def on_command_update(self, job_command_tasks: dict[str, list[CommandTask]]) -> None:
-        self.completed_commands = sum(
-            1 for tasks in job_command_tasks.values()
-            for t in tasks if t.status == BuildStatus.DONE
-        )
+        with self.lock:
+            if self.scheduled_tasks is not None:
+                self.completed_commands = sum(
+                    1 for t in self.scheduled_tasks if t.status == BuildStatus.DONE
+                )
+            else:
+                self.completed_commands = sum(
+                    1 for tasks in job_command_tasks.values()
+                    for t in tasks if t.status == BuildStatus.DONE
+                )
 
-        active_tasks = job_command_tasks.get(self.current_job_name, [])
-        phase_tasks = [t for t in active_tasks if t.phase == self.current_phase_name]
-        running_idx = None
-        done_in_phase = 0
-        active_cmd_text = ""
-        for idx, t in enumerate(phase_tasks, start=1):
-            if t.status == BuildStatus.RUNNING and running_idx is None:
-                running_idx = idx
-                active_cmd_text = t.command
-            if t.status == BuildStatus.DONE:
-                done_in_phase += 1
+            if self.current_phase_tasks is not None:
+                phase_tasks = self.current_phase_tasks
+            else:
+                active_tasks = job_command_tasks.get(self.current_job_name, [])
+                phase_tasks = [t for t in active_tasks if t.phase == self.current_phase_name]
 
-        if running_idx is not None:
-            self.current_cmd_idx = running_idx
-            self.current_command_text = active_cmd_text
-        elif done_in_phase < len(phase_tasks):
-            self.current_cmd_idx = done_in_phase + 1
-            self.current_command_text = phase_tasks[done_in_phase].command
-        else:
-            self.current_cmd_idx = len(phase_tasks)
-            if phase_tasks:
-                self.current_command_text = phase_tasks[-1].command
+            running_idx = None
+            done_in_phase = 0
+            active_cmd_text = ""
+            for idx, t in enumerate(phase_tasks, start=1):
+                if t.status == BuildStatus.RUNNING and running_idx is None:
+                    running_idx = idx
+                    active_cmd_text = t.command
+                if t.status == BuildStatus.DONE:
+                    done_in_phase += 1
 
-        phase_part = f" ({self.current_phase_name})" if self.current_phase_name and self.current_phase_name != "default" else ""
-        title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {self.current_job_name}{phase_part}"
-        self.update_window_title(title)
+            if running_idx is not None:
+                self.current_cmd_idx = running_idx
+                self.current_command_text = active_cmd_text
+            elif done_in_phase < len(phase_tasks):
+                self.current_cmd_idx = done_in_phase + 1
+                self.current_command_text = phase_tasks[done_in_phase].command
+            else:
+                self.current_cmd_idx = len(phase_tasks)
+                if phase_tasks:
+                    self.current_command_text = phase_tasks[-1].command
 
-        if self.is_quiet:
-            self.render_quiet_bar()
-        elif self.split_active:
-            self.render_split_dashboard()
+            phase_part = f" ({self.current_phase_name})" if self.current_phase_name and self.current_phase_name != "default" else ""
+            title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {self.current_job_name}{phase_part}"
+            self.update_window_title(title)
+
+            if self.is_quiet:
+                self.render_quiet_bar()
+            elif self.split_active:
+                self.render_split_dashboard()
 
     def end_phase(
         self,
@@ -1422,35 +1456,43 @@ class _QueueProgressReporter:
         duration: float,
         is_last_phase: bool,
     ) -> None:
-        if success and is_last_phase:
-            self.completed_jobs += 1
-        elif not success:
-            self.failed_jobs_count += 1
+        with self.lock:
+            if not success:
+                self._failed_job_names.add(job_name)
 
-        if self.is_quiet:
-            self.clear_quiet_bar()
-            badge = "PASS" if success else "FAIL"
-            phase_str = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
-            dur_sec = int(duration)
-            hrs, rem = divmod(dur_sec, 3600)
-            mins, secs = divmod(rem, 60)
-            dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
-            action_verb = "completed" if success else "failed"
-            self.stream.write(f"[LBS] [{badge}] '{job_name}'{phase_str} {action_verb} in {dur_str}\n")
-            self.stream.flush()
-        elif self.split_active:
-            self.render_split_dashboard()
+            if is_last_phase and job_name not in self._finished_jobs:
+                self._finished_jobs.add(job_name)
+                if job_name in self._failed_job_names:
+                    self.failed_jobs_count += 1
+                else:
+                    self.completed_jobs += 1
+
+            if self.is_quiet:
+                self.clear_quiet_bar()
+                badge = "PASS" if success else "FAIL"
+                phase_str = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
+                dur_sec = int(duration)
+                hrs, rem = divmod(dur_sec, 3600)
+                mins, secs = divmod(rem, 60)
+                dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+                action_verb = "completed" if success else "failed"
+                self.stream.write(f"[LBS] [{badge}] '{job_name}'{phase_str} {action_verb} in {dur_str}\n")
+                self.stream.flush()
+            elif self.split_active:
+                self.render_split_dashboard()
 
     def finish(self, session_success: bool) -> None:
-        self.clear_quiet_bar()
-        self.disable_split_screen()
-        status_str = "SUCCESS" if session_success else "FAILED"
-        self.update_window_title(f"LBS: Session {status_str}")
+        with self.lock:
+            self.clear_quiet_bar()
+            self.disable_split_screen()
+            status_str = "SUCCESS" if session_success else "FAILED"
+            self.update_window_title(f"LBS: Session {status_str}")
 
     def finish_interrupted(self) -> None:
-        self.clear_quiet_bar()
-        self.disable_split_screen()
-        self.update_window_title("LBS: Session CANCELLED (Ctrl+C)")
+        with self.lock:
+            self.clear_quiet_bar()
+            self.disable_split_screen()
+            self.update_window_title("LBS: Session CANCELLED (Ctrl+C)")
 
 
 def _init_job_states(
@@ -1862,7 +1904,7 @@ class Scheduler:
                 if j.name in jobs_to_run and j.build_it and j.name not in succeeded_jobs
             ]
             total_jobs_count = len(enabled_target_jobs)
-            total_commands_count = 0
+            scheduled_tasks: list[CommandTask] = []
             for j, p in execution_tasks:
                 tasks = _filter_phase_commands_to_run(
                     job=j,
@@ -1874,13 +1916,15 @@ class Scheduler:
                     resume=resume,
                 )
                 if tasks:
-                    total_commands_count += len(tasks)
+                    scheduled_tasks.extend(tasks)
+            total_commands_count = len(scheduled_tasks)
 
             progress_reporter = _QueueProgressReporter(
                 total_jobs=total_jobs_count,
                 total_commands=total_commands_count,
                 session_start_time=session_start_time,
                 is_quiet=getattr(config.settings, "quiet", False) or not verbose_mode,
+                scheduled_tasks=scheduled_tasks,
             )
             progress_reporter.enable_split_screen()
 
@@ -1941,8 +1985,10 @@ class Scheduler:
                         progress_reporter=progress_reporter,
                     )
                     active_job = None
-
-                    is_last_phase = not any(j.name == job.name for j, p in execution_tasks[task_idx + 1:])
+                    is_last_phase = (
+                        should_abort
+                        or not any(j.name == job.name for j, p in execution_tasks[task_idx + 1:])
+                    )
                     progress_reporter.end_phase(
                         job_name=job.name,
                         phase_name=phase_name,

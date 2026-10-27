@@ -655,18 +655,18 @@ In the post-run terminal summary and session log, an inline progress indicator c
 When executing in an interactive terminal (TTY), LBS delivers a real-time, non-intrusive progress experience without sacrificing compiler visibility:
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ [compiler stdout/stderr scrolling in top 75% viewport] │
-│ Compiling src/module.cc...                             │
-│ Linking build/bin/engine.dll...                        │
-├────────────────────────────────────────────────────────┤
-│ [LBS Pinned Dashboard - bottom 25% viewport]          │
-│ [████████████░░░░░░░░] 60.0% (6/10 tasks)              │
-│ Active:   core-engine (phase 'build')                  │
-│ Command:  ninja -C out/Release core_engine             │
-│ Status:   4 passed, 0 failed, 4 remaining              │
-│ Elapsed:  00:14:32  |  Log: logs/2026-10-27_engine.log │
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│ [compiler stdout/stderr scrolling in top ~75% viewport]               │
+│ Compiling src/module.cc...                                             │
+│ Linking build/bin/engine.dll...                                        │
+├────────────────────────────────────────────────────────────────────────┤
+│ [LBS Pinned Dashboard - bottom ~25% viewport]                          │
+│ [LBS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│ [LBS] [████████████░░░░░░░░] 60% [3/5] | 'core-engine' (phase 'build') │
+│ [LBS] Active: [2/4] ninja -C out/Release core_engine                   │
+│ [LBS] Elapsed: 00:14:32 | Queue: 2 passed, 0 failed | Remaining: 2     │
+│ [LBS] Active log: logs/2026-10-27_engine_build.log                     │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 1. **Split-Screen Terminal (Default)**:
@@ -675,7 +675,7 @@ When executing in an interactive terminal (TTY), LBS delivers a real-time, non-i
    - Restores normal scrolling margins (`\033[r`) automatically on completion, error, or early exit (`atexit`).
 2. **Quiet Mode (`-q` / `--quiet`)**:
    - For minimal distraction, passing `-q` suppresses the compiler streaming viewport and renders a single-line in-place updating progress bar (`\r`).
-   - When a phase or job finishes, it prints a permanent frozen completion milestone line (e.g. `✔ [job-name] Phase 'build' completed in 00:03:12`).
+   - When a phase or job finishes, it prints a permanent frozen completion milestone line (e.g. `[LBS] [PASS] 'job-name' (phase 'build') completed in 00:03:12`).
 3. **Dynamic Terminal / Tab Titles**:
    - LBS emits ANSI OSC 0 escape sequences (`\033]0;...\007`) on supported terminals, updating your window or tab title to `[X/Y] (pct%) LBS: <job> (<phase>)` so you can glance at build progress while multitasking.
 4. **CI & Non-TTY Graceful Fallback**:

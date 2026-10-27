@@ -183,3 +183,25 @@ def test_terminate_process_tree_calls():
             _terminate_process(mock_proc)
             assert mock_killpg.called
 
+
+def test_executor_stream_lock_synchronization(tmp_path):
+    """Verify that JobExecutor acquires stream_lock when streaming output in verbose mode."""
+    import threading
+    from unittest.mock import MagicMock
+
+    mock_lock = MagicMock(spec=threading.RLock())
+    # Configure context manager protocol
+    mock_lock.__enter__.return_value = None
+    mock_lock.__exit__.return_value = None
+
+    executor = JobExecutor(verbose=True, stream_lock=mock_lock)
+    log_file = io.StringIO()
+    py_cmd = f'"{sys.executable}" -c "print(\'locked-output\')"'
+
+    result = executor.run_command(py_cmd, cwd=str(tmp_path), log_file=log_file)
+    assert result.success is True
+    # The lock must have been entered and exited for stdout mirroring
+    assert mock_lock.__enter__.called
+    assert mock_lock.__exit__.called
+
+
