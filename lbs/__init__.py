@@ -9,13 +9,14 @@ A sequential build job runner for local development workflows.
 
 __version__ = "1.0.0"
 
-from lbs.runner import run_scheduler, Scheduler, clean_session_state
+from lbs.runner import run_scheduler, Scheduler, clean_session_state, format_session_status
 from lbs.utils.executor import JobExecutor, CommandResult
 
 __all__ = [
     "run_scheduler",
     "Scheduler",
     "clean_session_state",
+    "format_session_status",
     "JobExecutor",
     "CommandResult",
 ]
