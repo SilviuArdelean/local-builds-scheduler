@@ -2287,6 +2287,7 @@ class Scheduler:
 
             current_phase_header = None
             active_job = None
+            active_job_start_time = None
             try:
                 for task_idx, (job, phase_name) in enumerate(execution_tasks):
                     cmds_to_run_tasks = _filter_phase_commands_to_run(
@@ -2321,6 +2322,7 @@ class Scheduler:
                     )
 
                     active_job = job
+                    active_job_start_time = time.perf_counter()
                     p_success, should_abort, p_duration = _execute_phase_run(
                         job=job,
                         phase_name=phase_name,
@@ -2342,6 +2344,7 @@ class Scheduler:
                         progress_reporter=progress_reporter,
                     )
                     active_job = None
+                    active_job_start_time = None
                     is_last_phase = (
                         should_abort
                         or not any(j.name == job.name for j, p in execution_tasks[task_idx + 1:])
@@ -2380,6 +2383,9 @@ class Scheduler:
                             t.exit_code = 130
                     job_summaries[active_job.name]["status"] = "INTERRUPTED"
                     job_summaries[active_job.name]["build_status"] = BuildStatus.FAILED.value
+                    if active_job_start_time is not None:
+                        curr_dur = time.perf_counter() - active_job_start_time
+                        job_summaries[active_job.name]["duration"] = round(curr_dur, 2)
 
                 for rem_job, _ in execution_tasks:
                     if job_summaries[rem_job.name]["status"] == "PENDING":
@@ -2399,7 +2405,41 @@ class Scheduler:
                 passed_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "SUCCESS")
                 interrupted_cnt = sum(1 for s in job_summaries.values() if s.get("status") == "INTERRUPTED")
                 pending_cnt = sum(1 for s in job_summaries.values() if s.get("status") in NOT_COMPLETED_STATUSES)
+                failed_cnt = sum(1 for s in job_summaries.values() if s.get("status") in ("FAILED", "INTERRUPTED"))
                 cfg_display = str(config_path) if config_path else "<config>"
+
+                elapsed_time = time.perf_counter() - session_start_time
+                total_seconds = int(elapsed_time)
+                h = total_seconds // 3600
+                m = (total_seconds % 3600) // 60
+                s = total_seconds % 60
+                duration_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+                aborted_jobs_list = []
+                for name, summary in job_summaries.items():
+                    st = summary.get("status")
+                    if st in NOT_COMPLETED_STATUSES:
+                        label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
+                        aborted_jobs_list.append(f"{name} ({label})")
+
+                resume_cmd = f"lbs run {cfg_display} --resume latest"
+
+                try:
+                    from lbs.utils.notifier import dispatch_notifications
+                    dispatch_notifications(
+                        settings=config.settings,
+                        success=False,
+                        passed_count=passed_cnt,
+                        failed_count=failed_cnt,
+                        skipped_count=pending_cnt,
+                        duration_str=duration_str,
+                        job_summaries=job_summaries,
+                        interrupted=True,
+                        aborted_jobs=aborted_jobs_list,
+                        resume_cmd=resume_cmd,
+                    )
+                except Exception:
+                    pass
 
                 print(
                     f"\n[LBS] Run interrupted by user (Ctrl+C). "
@@ -2432,6 +2472,18 @@ class Scheduler:
             log_to_session(f"--- Session ended (status: {session_status}) ---")
 
             # Dispatch notification callbacks
+            aborted_jobs_list = None
+            resume_cmd = None
+            if not overall_success:
+                aborted_jobs_list = []
+                for name, summary in job_summaries.items():
+                    st = summary.get("status")
+                    if st in NOT_COMPLETED_STATUSES:
+                        label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
+                        aborted_jobs_list.append(f"{name} ({label})")
+                cfg_display = str(config_path) if config_path else "<config>"
+                resume_cmd = f"lbs run {cfg_display} --resume latest"
+
             from lbs.utils.notifier import dispatch_notifications
             dispatch_notifications(
                 settings=config.settings,
@@ -2441,6 +2493,9 @@ class Scheduler:
                 skipped_count=skipped_count,
                 duration_str=duration_str,
                 job_summaries=job_summaries,
+                interrupted=False,
+                aborted_jobs=aborted_jobs_list,
+                resume_cmd=resume_cmd,
             )
 
             return overall_success

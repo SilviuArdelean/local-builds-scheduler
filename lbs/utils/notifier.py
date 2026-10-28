@@ -105,12 +105,23 @@ def _post_json(url: str, payload: dict) -> None:
         pass
 
 
-def dispatch_notifications(settings, success: bool, passed_count: int,
-                           failed_count: int, skipped_count: int,
-                           duration_str: str, job_summaries: dict) -> None:
+def dispatch_notifications(
+    settings,
+    success: bool,
+    passed_count: int,
+    failed_count: int,
+    skipped_count: int,
+    duration_str: str,
+    job_summaries: dict,
+    interrupted: bool = False,
+    aborted_jobs: list[str] | None = None,
+    resume_cmd: str | None = None,
+) -> None:
     """
     Dispatch status notifications to all configured channels based on run outcome.
     """
+    if not settings or not getattr(settings, "notifications", None):
+        return
     config = settings.notifications
 
     # Filter based on success/failure rules
@@ -119,24 +130,93 @@ def dispatch_notifications(settings, success: bool, passed_count: int,
     if not success and not config.on_failure:
         return
 
-    status_str = "SUCCESS" if success else "FAILED"
-    title = f"LBS Session Completed: {status_str}"
+    if interrupted:
+        title = "LBS Session Interrupted: CANCELLED"
+    else:
+        status_str = "SUCCESS" if success else "FAILED"
+        title = f"LBS Session Completed: {status_str}"
 
-    lines = [
-        f"Status: {status_str}", f"Passed: {passed_count}",
-        f"Failed: {failed_count}", f"Skipped: {skipped_count}",
-        f"Duration: {duration_str}"
-    ]
-
-    # If there are failures, append job details
-    if failed_count > 0:
-        lines.append("")
-        lines.append("Failed Jobs:")
+    formatted_aborted = []
+    if aborted_jobs:
+        for item in aborted_jobs:
+            item_str = str(item).strip()
+            if not item_str.startswith("• "):
+                if "(" not in item_str and job_summaries and item_str in job_summaries:
+                    st = job_summaries[item_str].get("status", "aborted").lower()
+                    if st in ("disabled", "skipped", "partial", "aborted"):
+                        item_str = f"• {item_str} ({st})"
+                    else:
+                        item_str = f"• {item_str} (aborted)"
+                elif "(" not in item_str:
+                    item_str = f"• {item_str} (aborted)"
+                else:
+                    item_str = f"• {item_str}"
+            formatted_aborted.append(item_str)
+    elif aborted_jobs is None and (not success or interrupted) and job_summaries:
         for name, summary in job_summaries.items():
-            if summary.get("status") == "FAILED":
+            st = summary.get("status")
+            if st in ("ABORTED", "PARTIAL", "SKIPPED", "DISABLED", "PENDING"):
+                label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
+                formatted_aborted.append(f"• {name} ({label})")
+
+    if interrupted or formatted_aborted:
+        if interrupted:
+            status_line = "Status: CANCELLED (Interrupted by user)"
+        else:
+            fail_word = "failure" if failed_count == 1 else "failures"
+            status_line = (
+                f"Status: FAILED (Aborted after {failed_count} {fail_word})"
+                if failed_count > 0
+                else "Status: FAILED (Aborted)"
+            )
+
+        aborted_cnt = len(formatted_aborted) if formatted_aborted else skipped_count
+        lines = [
+            status_line,
+            f"Passed: {passed_count} | Failed: {failed_count} | Aborted: {aborted_cnt}",
+            f"Duration: {duration_str}",
+        ]
+    else:
+        status_str = "SUCCESS" if success else "FAILED"
+        lines = [
+            f"Status: {status_str}",
+            f"Passed: {passed_count}",
+            f"Failed: {failed_count}",
+            f"Skipped: {skipped_count}",
+            f"Duration: {duration_str}",
+        ]
+
+    # If there are failures or interruptions, append job details
+    if failed_count > 0 or (interrupted and job_summaries):
+        failed_entries = []
+        for name, summary in job_summaries.items():
+            if summary.get("status") in ("FAILED", "INTERRUPTED"):
                 dur = summary.get("duration")
-                dur_str = f"{dur:.2f}s" if dur is not None else "N/A"
-                lines.append(f"• {name} (failed in {dur_str})")
+                if isinstance(dur, (int, float)):
+                    h = int(dur) // 3600
+                    m = (int(dur) % 3600) // 60
+                    s = int(dur) % 60
+                    dur_str = f"{h:02d}:{m:02d}:{s:02d}"
+                elif isinstance(dur, str):
+                    dur_str = dur
+                else:
+                    dur_str = "N/A"
+                failed_entries.append(f"• {name} (failed in {dur_str})")
+        if failed_entries:
+            lines.append("")
+            lines.append("Failed Jobs:")
+            lines.extend(failed_entries)
+
+    if formatted_aborted:
+        lines.append("")
+        lines.append("Aborted / Skipped:")
+        for item in formatted_aborted:
+            lines.append(item)
+
+    if resume_cmd:
+        lines.append("")
+        lines.append("Resume command:")
+        lines.append(f"  {resume_cmd.strip()}")
 
     message = "\n".join(lines)
 

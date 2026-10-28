@@ -259,3 +259,155 @@ def test_no_notifications_flag_disables_triggers():
                                duration_str="00:00:05",
                                job_summaries={})
         assert mock_urlopen.call_count == 0
+
+
+def test_dispatch_notifications_aborted_session():
+    """Verify notification payload structure for an aborted session."""
+    from lbs.utils.notifier import dispatch_notifications
+
+    mock_settings = MagicMock()
+    mock_settings.notifications.on_success = True
+    mock_settings.notifications.on_failure = True
+    mock_settings.notifications.slack_webhook = "https://hooks.slack.com/services/test"
+
+    job_summaries = {
+        "chromium-debug": {"status": "FAILED", "duration": 2521.0},
+        "package-artifacts": {"status": "ABORTED"},
+        "upload-symbols": {"status": "DISABLED"},
+    }
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        dispatch_notifications(
+            settings=mock_settings,
+            success=False,
+            passed_count=1,
+            failed_count=1,
+            skipped_count=2,
+            duration_str="00:42:01",
+            job_summaries=job_summaries,
+            interrupted=False,
+            aborted_jobs=["package-artifacts (aborted)", "upload-symbols (disabled)"],
+            resume_cmd="lbs run configs/chromium.yaml --resume latest",
+        )
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        data = json.loads(req.data.decode("utf-8"))
+        text = data["text"]
+
+        assert "*LBS Session Completed: FAILED*" in text
+        assert "Status: FAILED (Aborted after 1 failure)" in text
+        assert "Passed: 1 | Failed: 1 | Aborted: 2" in text
+        assert "Duration: 00:42:01" in text
+        assert "Failed Jobs:\n• chromium-debug (failed in 00:42:01)" in text
+        assert "Aborted / Skipped:\n• package-artifacts (aborted)\n• upload-symbols (disabled)" in text
+        assert "Resume command:\n  lbs run configs/chromium.yaml --resume latest" in text
+
+
+def test_dispatch_notifications_interrupted_session():
+    """Verify notification payload structure for a session interrupted by Ctrl+C."""
+    from lbs.utils.notifier import dispatch_notifications
+
+    mock_settings = MagicMock()
+    mock_settings.notifications.on_success = True
+    mock_settings.notifications.on_failure = True
+    mock_settings.notifications.slack_webhook = "https://hooks.slack.com/services/test"
+
+    job_summaries = {
+        "job-1": {"status": "SUCCESS", "duration": 10.0},
+        "job-2": {"status": "INTERRUPTED", "duration": 5.0},
+        "job-3": {"status": "ABORTED"},
+    }
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        dispatch_notifications(
+            settings=mock_settings,
+            success=False,
+            passed_count=1,
+            failed_count=1,
+            skipped_count=1,
+            duration_str="00:00:15",
+            job_summaries=job_summaries,
+            interrupted=True,
+            aborted_jobs=["job-3 (aborted)"],
+            resume_cmd="lbs run configs/test.yaml --resume latest",
+        )
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        data = json.loads(req.data.decode("utf-8"))
+        text = data["text"]
+
+        assert "*LBS Session Interrupted: CANCELLED*" in text
+        assert "Status: CANCELLED (Interrupted by user)" in text
+        assert "Passed: 1 | Failed: 1 | Aborted: 1" in text
+        assert "Duration: 00:00:15" in text
+        assert "Failed Jobs:\n• job-2 (failed in 00:00:05)" in text
+        assert "Aborted / Skipped:\n• job-3 (aborted)" in text
+        assert "Resume command:\n  lbs run configs/test.yaml --resume latest" in text
+
+
+@patch("urllib.request.urlopen")
+def test_scheduler_run_triggers_notification_on_keyboard_interrupt(mock_urlopen, tmp_path):
+    """Verify that Scheduler.run dispatches notification upon KeyboardInterrupt."""
+    import pytest
+
+    log_dir = tmp_path / "logs"
+    settings = Settings(
+        log_dir=str(log_dir),
+        notifications=NotificationsConfig(
+            on_failure=True,
+            slack_webhook="https://hooks.slack.com/services/on-interrupt",
+        ),
+    )
+    jobs = [
+        Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"]),
+        Job(name="job-2", cwd=str(tmp_path), commands=["echo 2"]),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    with patch("lbs.runner._execute_phase_run", side_effect=KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            Scheduler.run(config, config_path=tmp_path / "test.yaml")
+
+    assert mock_urlopen.call_count == 1
+    req = mock_urlopen.call_args[0][0]
+    data = json.loads(req.data.decode("utf-8"))
+    assert "*LBS Session Interrupted: CANCELLED*" in data["text"]
+    assert "Status: CANCELLED" in data["text"]
+    assert "Resume command:" in data["text"]
+
+
+@patch("urllib.request.urlopen")
+def test_scheduler_run_triggers_notification_on_stop_on_failure_abort(mock_urlopen, tmp_path):
+    """Verify that Scheduler.run dispatches abort breakdown when stop_on_failure halts execution."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(
+        stop_on_failure=True,
+        log_dir=str(log_dir),
+        notifications=NotificationsConfig(
+            on_failure=True,
+            slack_webhook="https://hooks.slack.com/services/on-abort",
+        ),
+    )
+    # job-1 fails, job-2 should be aborted
+    jobs = [
+        Job(name="job-fail", cwd=str(tmp_path), commands=['python -c "import sys; sys.exit(1)"']),
+        Job(name="job-aborted", cwd=str(tmp_path), commands=["echo hello"]),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, config_path=tmp_path / "test.yaml")
+    assert success is False
+
+    assert mock_urlopen.call_count == 1
+    req = mock_urlopen.call_args[0][0]
+    data = json.loads(req.data.decode("utf-8"))
+    text = data["text"]
+
+    assert "*LBS Session Completed: FAILED*" in text
+    assert "Status: FAILED (Aborted after 1 failure)" in text
+    assert "Passed: 0 | Failed: 1 | Aborted: 1" in text
+    assert "Failed Jobs:" in text
+    assert "job-fail" in text
+    assert "Aborted / Skipped:" in text
+    assert "• job-aborted (aborted)" in text
+    assert "Resume command:" in text
