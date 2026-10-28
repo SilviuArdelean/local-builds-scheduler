@@ -1252,6 +1252,12 @@ def _describe_job_progress(summary: dict) -> str:
     return ""
 
 
+def _build_aborted_jobs_list(job_summaries: dict) -> list[str]:
+    """Extracts a list of aborted/skipped/disabled job descriptors from job_summaries."""
+    from lbs.utils.notifier import build_aborted_jobs_list
+    return build_aborted_jobs_list(job_summaries)
+
+
 def _build_summary_text(
     job_summaries: dict,
     overall_success: bool,
@@ -2385,7 +2391,10 @@ class Scheduler:
                     job_summaries[active_job.name]["build_status"] = BuildStatus.FAILED.value
                     if active_job_start_time is not None:
                         curr_dur = time.perf_counter() - active_job_start_time
-                        job_summaries[active_job.name]["duration"] = round(curr_dur, 2)
+                        accumulated = job_durations.get(active_job.name, 0.0) or 0.0
+                        total_job_dur = accumulated + curr_dur
+                        job_durations[active_job.name] = total_job_dur
+                        job_summaries[active_job.name]["duration"] = round(total_job_dur, 2)
 
                 for rem_job, _ in execution_tasks:
                     if job_summaries[rem_job.name]["status"] == "PENDING":
@@ -2415,17 +2424,11 @@ class Scheduler:
                 s = total_seconds % 60
                 duration_str = f"{h:02d}:{m:02d}:{s:02d}"
 
-                aborted_jobs_list = []
-                for name, summary in job_summaries.items():
-                    st = summary.get("status")
-                    if st in NOT_COMPLETED_STATUSES:
-                        label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
-                        aborted_jobs_list.append(f"{name} ({label})")
-
+                from lbs.utils.notifier import build_aborted_jobs_list, dispatch_notifications
+                aborted_jobs_list = build_aborted_jobs_list(job_summaries)
                 resume_cmd = f"lbs run {cfg_display} --resume latest"
 
                 try:
-                    from lbs.utils.notifier import dispatch_notifications
                     dispatch_notifications(
                         settings=config.settings,
                         success=False,
@@ -2475,12 +2478,8 @@ class Scheduler:
             aborted_jobs_list = None
             resume_cmd = None
             if not overall_success:
-                aborted_jobs_list = []
-                for name, summary in job_summaries.items():
-                    st = summary.get("status")
-                    if st in NOT_COMPLETED_STATUSES:
-                        label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
-                        aborted_jobs_list.append(f"{name} ({label})")
+                from lbs.utils.notifier import build_aborted_jobs_list
+                aborted_jobs_list = build_aborted_jobs_list(job_summaries)
                 cfg_display = str(config_path) if config_path else "<config>"
                 resume_cmd = f"lbs run {cfg_display} --resume latest"
 

@@ -105,6 +105,28 @@ def _post_json(url: str, payload: dict) -> None:
         pass
 
 
+NOT_COMPLETED_STATUS_SET = frozenset({"SKIPPED", "PENDING", "PARTIAL", "ABORTED", "DISABLED"})
+
+
+def build_aborted_jobs_list(job_summaries: dict) -> list[str]:
+    """
+    Extracts a list of aborted/skipped/disabled job descriptors from job_summaries.
+    Format: '<job_name> (<label>)' where label is disabled, skipped, or aborted.
+    """
+    aborted_jobs = []
+    for name, summary in job_summaries.items():
+        st = summary.get("status")
+        if st in NOT_COMPLETED_STATUS_SET:
+            if st == "DISABLED":
+                label = "disabled"
+            elif st == "SKIPPED":
+                label = "skipped"
+            else:
+                label = "aborted"
+            aborted_jobs.append(f"{name} ({label})")
+    return aborted_jobs
+
+
 def dispatch_notifications(
     settings,
     success: bool,
@@ -142,9 +164,11 @@ def dispatch_notifications(
             item_str = str(item).strip()
             if not item_str.startswith("• "):
                 if "(" not in item_str and job_summaries and item_str in job_summaries:
-                    st = job_summaries[item_str].get("status", "aborted").lower()
-                    if st in ("disabled", "skipped", "partial", "aborted"):
-                        item_str = f"• {item_str} ({st})"
+                    st = job_summaries[item_str].get("status")
+                    if st == "DISABLED":
+                        item_str = f"• {item_str} (disabled)"
+                    elif st == "SKIPPED":
+                        item_str = f"• {item_str} (skipped)"
                     else:
                         item_str = f"• {item_str} (aborted)"
                 elif "(" not in item_str:
@@ -153,11 +177,7 @@ def dispatch_notifications(
                     item_str = f"• {item_str}"
             formatted_aborted.append(item_str)
     elif aborted_jobs is None and (not success or interrupted) and job_summaries:
-        for name, summary in job_summaries.items():
-            st = summary.get("status")
-            if st in ("ABORTED", "PARTIAL", "SKIPPED", "DISABLED", "PENDING"):
-                label = "disabled" if st == "DISABLED" else ("skipped" if st == "SKIPPED" else "aborted")
-                formatted_aborted.append(f"• {name} ({label})")
+        formatted_aborted = [f"• {item}" for item in build_aborted_jobs_list(job_summaries)]
 
     if interrupted or formatted_aborted:
         if interrupted:

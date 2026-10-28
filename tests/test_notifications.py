@@ -411,3 +411,80 @@ def test_scheduler_run_triggers_notification_on_stop_on_failure_abort(mock_urlop
     assert "Aborted / Skipped:" in text
     assert "• job-aborted (aborted)" in text
     assert "Resume command:" in text
+
+
+def test_build_aborted_jobs_list_helper():
+    """Verify that build_aborted_jobs_list correctly categorizes all non-completed statuses."""
+    from lbs.utils.notifier import build_aborted_jobs_list
+    from lbs.runner import _build_aborted_jobs_list
+
+    summaries = {
+        "job-success": {"status": "SUCCESS"},
+        "job-failed": {"status": "FAILED"},
+        "job-disabled": {"status": "DISABLED"},
+        "job-skipped": {"status": "SKIPPED"},
+        "job-aborted": {"status": "ABORTED"},
+        "job-partial": {"status": "PARTIAL"},
+        "job-pending": {"status": "PENDING"},
+    }
+
+    aborted = build_aborted_jobs_list(summaries)
+    assert aborted == [
+        "job-disabled (disabled)",
+        "job-skipped (skipped)",
+        "job-aborted (aborted)",
+        "job-partial (aborted)",
+        "job-pending (aborted)",
+    ]
+
+    # Verify runner module helper produces identical result
+    assert _build_aborted_jobs_list(summaries) == aborted
+
+
+def test_multiphase_job_interruption_duration_accumulates(tmp_path):
+    """Verify that when a multi-phase job is interrupted, duration includes prior completed phases."""
+    import pytest
+    import time
+
+    log_dir = tmp_path / "logs"
+    settings = Settings(log_dir=str(log_dir))
+    job = Job(
+        name="multi-phase-job",
+        cwd=str(tmp_path),
+        phases={
+            "phase-1": ["echo p1"],
+            "phase-2": ["echo p2"],
+        },
+    )
+    config = Config(settings=settings, jobs=[job])
+
+    original_execute_phase_run = None
+    from lbs.runner import _execute_phase_run as real_execute_phase_run
+
+    def mock_phase_run(*args, **kwargs):
+        phase_name = kwargs.get("phase_name")
+        if phase_name == "phase-1":
+            # Simulate phase 1 taking 2.5 seconds
+            job_durations = kwargs.get("job_durations")
+            job_name = kwargs.get("job").name
+            job_durations[job_name] += 2.5
+            return True, False, 2.5
+        elif phase_name == "phase-2":
+            # Interrupt during phase 2
+            time.sleep(0.05)
+            raise KeyboardInterrupt
+
+    with patch("lbs.runner._execute_phase_run", side_effect=mock_phase_run):
+        with pytest.raises(KeyboardInterrupt):
+            Scheduler.run(config, config_path=tmp_path / "test.yaml")
+
+    # Verify saved status file records accumulated duration >= 2.5s
+    from lbs.config import resolve_status_path
+    status_path = resolve_status_path(log_dir, tmp_path / "test.yaml")
+    assert status_path.is_file()
+    import json
+    data = json.loads(status_path.read_text(encoding="utf-8"))
+    job_summary = data["jobs"]["multi-phase-job"]
+    assert job_summary["status"] == "INTERRUPTED"
+    assert job_summary["duration"] >= 2.5
+
