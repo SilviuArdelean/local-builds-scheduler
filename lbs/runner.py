@@ -852,17 +852,21 @@ def _generate_job_script(
         lines.append("@echo off\n")
         if tasks and progress_path:
             for i, cmd in enumerate(commands):
-                lines.append(f'>>"{progress_path}" echo START:{i}\n')
+                if i > 0:
+                    lines.append("@echo off\n")
+                lines.append(f'@>>"{progress_path}" echo START:{i}\n')
                 lines.append(f"{cmd}\n")
-                lines.append("if %ERRORLEVEL% neq 0 (\n")
-                lines.append(f'    >>"{progress_path}" echo FAIL:{i}:%ERRORLEVEL%\n')
-                lines.append("    exit /b %ERRORLEVEL%\n")
+                lines.append("@if %ERRORLEVEL% neq 0 (\n")
+                lines.append(f'    @>>"{progress_path}" echo FAIL:{i}:%ERRORLEVEL%\n')
+                lines.append("    @exit /b %ERRORLEVEL%\n")
                 lines.append(")\n")
-                lines.append(f'>>"{progress_path}" echo DONE:{i}:0\n')
+                lines.append(f'@>>"{progress_path}" echo DONE:{i}:0\n')
         else:
-            for cmd in commands:
+            for i, cmd in enumerate(commands):
+                if i > 0:
+                    lines.append("@echo off\n")
                 lines.append(f"{cmd}\n")
-                lines.append("if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
+                lines.append("@if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%\n")
     else:
         lines.append("#!/bin/sh\n")
         if tasks and progress_path:
@@ -1368,9 +1372,9 @@ class _QueueProgressReporter:
     """Manages real-time queue progress bar, milestone dividers, and window titles.
 
     In Default (streaming) mode:
-      On a TTY, sets up a 75% / 25% split-screen console via DECSTBM scrolling regions:
-        - Top ~75%: Live compiler/child output scrolls continuously.
-        - Bottom ~25%: Pinned, persistent live status dashboard updating in real-time.
+      On a TTY, sets up a 25% / 75% split-screen console via DECSTBM scrolling regions:
+        - Top ~25%: Pinned, persistent live status dashboard updating in real-time.
+        - Bottom ~75%: Live compiler/child output scrolls continuously.
       On non-TTY (pipes/CI), outputs clean sequential milestone divider text blocks.
 
     In --quiet mode:
@@ -1423,12 +1427,14 @@ class _QueueProgressReporter:
         self.last_rendered_len = 0
         self.active_bar_active = False
 
-        # Split screen state (Top ~75% scrolling, Bottom ~25% dashboard)
+        # Split screen state (Top ~25% pinned dashboard, Bottom ~75% scrolling output)
         self.split_active = False
-        self.scroll_end = 18
-        self.status_start = 19
+        self.status_start = 1
         self.status_lines_count = 5
+        self.scroll_start = 6
+        self.scroll_end = 24
         self.last_term_lines = 24
+        self.last_term_cols = 80
 
         if self.is_tty and not self.is_quiet:
             try:
@@ -1445,9 +1451,11 @@ class _QueueProgressReporter:
                 return
 
             self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
-            self.scroll_end = term_lines - self.status_lines_count
-            self.status_start = self.scroll_end + 1
+            self.status_start = 1
+            self.scroll_start = self.status_lines_count + 1
+            self.scroll_end = term_lines
             self.last_term_lines = term_lines
+            self.last_term_cols = term_cols
             self.split_active = True
 
             if sys.platform == "win32":
@@ -1458,9 +1466,9 @@ class _QueueProgressReporter:
 
             # Clear screen, scrollback buffer, and home cursor before setting scroll region
             self.stream.write("\033[2J\033[3J\033[H")
-            # Set top scrolling margin
-            self.stream.write(f"\033[1;{self.scroll_end}r")
-            self.stream.write("\033[1;1H")
+            # Set bottom scrolling region (rows scroll_start..scroll_end), leaving top rows pinned
+            self.stream.write(f"\033[{self.scroll_start};{self.scroll_end}r")
+            self.stream.write(f"\033[{self.scroll_start};1H")
             self.stream.flush()
             self.render_split_dashboard()
 
@@ -1579,13 +1587,54 @@ class _QueueProgressReporter:
             self.stream.write("\033[?25l\0337\033[s")
 
             term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-            # Handle dynamic terminal resize
-            if term_lines != getattr(self, "last_term_lines", term_lines):
-                self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
-                self.scroll_end = term_lines - self.status_lines_count
-                self.status_start = self.scroll_end + 1
+            term_cols = max(1, term_cols)
+            term_lines = max(1, term_lines)
+
+            old_term_lines = getattr(self, "last_term_lines", term_lines)
+            old_term_cols = getattr(self, "last_term_cols", term_cols)
+            old_status_start = max(1, getattr(self, "status_start", 1))
+            old_status_lines_count = max(1, getattr(self, "status_lines_count", 5))
+            old_scroll_start = max(1, getattr(self, "scroll_start", old_status_start + old_status_lines_count))
+
+            # Handle dynamic terminal resize (lines or columns)
+            if term_lines != old_term_lines or term_cols != old_term_cols:
+                desired_status_lines = max(5, min(8, int(term_lines * 0.25)))
+                if term_lines > 1:
+                    new_status_lines_count = min(desired_status_lines, term_lines - 1)
+                    new_status_start = 1
+                    new_scroll_start = new_status_lines_count + 1
+                    new_scroll_end = term_lines
+                else:
+                    new_status_lines_count = 1
+                    new_status_start = 1
+                    new_scroll_start = 1
+                    new_scroll_end = 1
+
+                # Erase old dashboard area (old_status_start .. old dashboard bottom)
+                # and new dashboard area (new_status_start .. new dashboard bottom),
+                # clamped to term_lines so we never write past the last row.
+                old_dashboard_bottom = old_status_start + old_status_lines_count - 1
+                new_dashboard_bottom = new_status_start + new_status_lines_count - 1
+                erase_start = max(1, min(old_status_start, new_status_start))
+                erase_end = min(term_lines, max(old_dashboard_bottom, new_dashboard_bottom))
+                for row in range(erase_start, erase_end + 1):
+                    self.stream.write(f"\033[{row};1H\033[2K")
+
+                self.status_lines_count = new_status_lines_count
+                self.status_start = new_status_start
+                self.scroll_start = new_scroll_start
+                self.scroll_end = new_scroll_end
                 self.last_term_lines = term_lines
-                self.stream.write(f"\033[1;{self.scroll_end}r")
+                self.last_term_cols = term_cols
+                self.stream.write(f"\033[{self.scroll_start};{self.scroll_end}r")
+
+                # Ensure cursor is left inside the scrolling region [scroll_start..scroll_end] after resize
+                if term_lines < old_term_lines:
+                    self.stream.write(f"\033[{self.scroll_end};1H\0337\033[s")
+                elif self.scroll_start > old_scroll_start:
+                    self.stream.write(f"\033[{self.scroll_start};1H\0337\033[s")
+                else:
+                    self.stream.write("\033[u\0338\0337\033[s")
 
             fill_ch, empty_ch, div_ch = self._safe_chars()
             pct = self._get_progress_percent()
@@ -1621,17 +1670,23 @@ class _QueueProgressReporter:
             if self.status_lines_count >= 7:
                 dashboard_lines.append(divider_line)
 
-            # Draw to the bottom region without touching the top scrolling area,
-            # erasing to end of line (\033[K) on every row.
-            for idx, d_line in enumerate(dashboard_lines):
-                row = self.status_start + idx
-                if len(d_line) >= term_cols:
-                    d_line = d_line[:term_cols - 1]
-                self.stream.write(f"\033[{row};1H{d_line}\033[K")
+            status_end = min(term_lines, self.status_start + self.status_lines_count - 1)
+            max_dashboard_rows = max(0, status_end - self.status_start + 1)
+            visible_dashboard_lines = dashboard_lines[:max_dashboard_rows]
 
-            # Clear any remaining lines in the status pane
-            for row in range(self.status_start + len(dashboard_lines), term_lines + 1):
-                self.stream.write(f"\033[{row};1H\033[K")
+            # Draw to the top pinned region without touching the bottom scrolling area,
+            # erasing each row first (\033[2K) and clearing to end of line (\033[K).
+            for idx, d_line in enumerate(visible_dashboard_lines):
+                row = self.status_start + idx
+                if row > term_lines:
+                    break
+                if len(d_line) >= term_cols:
+                    d_line = d_line[:max(0, term_cols - 1)]
+                self.stream.write(f"\033[{row};1H\033[2K{d_line}\033[K")
+
+            # Clear any remaining unused lines within the top status pane
+            for row in range(self.status_start + len(visible_dashboard_lines), status_end + 1):
+                self.stream.write(f"\033[{row};1H\033[2K\033[K")
 
             # 2. Restore cursor back to the scrolling region (both ANSI \033[u and DEC \0338), show cursor
             self.stream.write("\033[u\0338\033[?25h")

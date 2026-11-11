@@ -269,4 +269,21 @@ def test_executor_sanitizes_clink_and_ansi_from_child_output(tmp_path, capsys):
     assert "\x1b" not in captured.out
 
 
+def test_executor_sanitizes_once_per_chunk_and_write_stdout_is_pure(tmp_path):
+    """Verify sanitize_console_output is called once per output line and _write_stdout does not re-sanitize."""
+    from unittest.mock import patch
+    from lbs.utils.sanitizer import sanitize_console_output as real_sanitize
+
+    executor = JobExecutor(verbose=True)
+    log_file = io.StringIO()
+    py_cmd = f'"{sys.executable}" -c "print(\'line-one\')"'
+
+    with patch("lbs.utils.executor.sanitize_console_output", wraps=real_sanitize) as mock_sanitize:
+        result = executor.run_command(py_cmd, cwd=str(tmp_path), log_file=log_file)
+
+    assert result.success is True
+    assert mock_sanitize.call_count == 1
+
+
+
 
