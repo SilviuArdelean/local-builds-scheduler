@@ -92,13 +92,10 @@ class JobExecutor:
         self.stream_lock = stream_lock
 
     def _write_stdout(self, text: str) -> None:
-        if self.verbose:
-            clean_text = sanitize_console_output(text)
-            if not clean_text:
-                return
+        if self.verbose and text:
             with self.stream_lock if self.stream_lock is not None else nullcontext(
             ):
-                sys.stdout.write(clean_text)
+                sys.stdout.write(text)
                 sys.stdout.flush()
 
     def _write_stderr_error(self, message: str) -> None:
