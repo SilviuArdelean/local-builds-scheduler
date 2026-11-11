@@ -810,7 +810,7 @@ def test_scheduler_quiet_and_verbose_progress_integration(tmp_path):
 
 
 def test_queue_progress_reporter_split_screen_enable_disable():
-    """Ticket 10: Verifies 75%/25% split-screen DECSTBM scrolling regions and restoration."""
+    """Ticket 10: Verifies 25%/75% top-pinned split-screen DECSTBM scrolling regions and restoration."""
     import io
     from lbs.runner import _QueueProgressReporter
 
@@ -826,14 +826,15 @@ def test_queue_progress_reporter_split_screen_enable_disable():
 
     reporter.enable_split_screen()
     assert reporter.split_active is True
+    assert reporter.status_start == 1
     val = stream.getvalue()
     # Check that screen and scrollback are cleared and cursor homed before setting scroll region
     clear_seq = "\033[2J\033[3J\033[H"
-    region_seq = f"\033[1;{reporter.scroll_end}r"
+    region_seq = f"\033[{reporter.scroll_start};{reporter.scroll_end}r"
     assert clear_seq in val
     assert region_seq in val
     assert val.index(clear_seq) < val.index(region_seq)
-    assert "\033[1;1H" in val
+    assert f"\033[{reporter.scroll_start};1H" in val
 
     # Test clean disable and full-margin restoration
     reporter.disable_split_screen()
@@ -1208,6 +1209,171 @@ def test_split_screen_reproduction_with_clink_and_ansi_job_output(tmp_path, caps
     assert "'asb-c-main'" in captured.out
     assert "\033[K" in captured.out
     assert "\033[r" in captured.out
+
+
+def test_split_screen_dashboard_resize_erases_old_rows():
+    """Verify that when terminal height or width changes between render_split_dashboard() calls,
+    all old dashboard rows are erased with ESC[row;1H ESC[2K before the new dashboard is drawn.
+    """
+    import io
+    import re
+    import time
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=3,
+        total_commands=10,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    # Start at 80x24 -> status_start=1, status_lines_count=6 (rows 1..6), scroll_start=7, scroll_end=24
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 24))):
+        reporter.enable_split_screen()
+        job = Job(name="asb-c-second", cwd=".")
+        tasks = [
+            CommandTask(index=0, phase="sync", command="git fetch"),
+            CommandTask(index=1, phase="sync", command="git reset --hard FETCH_HEAD"),
+        ]
+        reporter.start_phase(
+            job=job,
+            phase_name="sync",
+            cmds_to_run_tasks=tasks,
+            log_path="logs/2026-11-11_asb-c-second_sync.log",
+            job_idx=2,
+        )
+
+    assert reporter.status_start == 1
+    assert reporter.status_lines_count == 6
+    assert reporter.scroll_start == 7
+    assert reporter.scroll_end == 24
+
+    # Clear stream buffer to inspect the resize render in isolation
+    stream.seek(0)
+    stream.truncate(0)
+
+    # Grow terminal to 80x32 -> status_start=1, status_lines_count=8 (rows 1..8), scroll_start=9, scroll_end=32
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 32))):
+        reporter.completed_commands = 3
+        reporter.render_split_dashboard()
+
+    out_grow = stream.getvalue()
+    assert reporter.status_start == 1
+    assert reporter.status_lines_count == 8
+    assert reporter.scroll_start == 9
+    assert reporter.scroll_end == 32
+
+    # Old dashboard rows 1..6 and new dashboard rows 1..8 must be erased with \033[{row};1H\033[2K
+    # before the new scroll region & redraw
+    new_region_idx = out_grow.index("\033[9;32r")
+    new_draw_idx = out_grow.index("\033[1;1H\033[2K[LBS]")
+    for old_row in range(1, 7):
+        erase_seq = f"\033[{old_row};1H\033[2K"
+        assert erase_seq in out_grow
+        assert out_grow.index(erase_seq) < new_region_idx < new_draw_idx
+
+    # Every new dashboard row (1..6) and unused top status rows (7..8) also use \033[2K
+    for r in range(1, 9):
+        assert f"\033[{r};1H\033[2K" in out_grow
+
+    # Cursor is restored at the end
+    assert out_grow.endswith("\033[u\0338\033[?25h")
+
+    # Now shrink terminal to 70x20 -> status_start=1, status_lines_count=5 (rows 1..5), scroll_start=6, scroll_end=20
+    stream.seek(0)
+    stream.truncate(0)
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((70, 20))):
+        reporter.render_split_dashboard()
+
+    out_shrink = stream.getvalue()
+    assert reporter.status_start == 1
+    assert reporter.status_lines_count == 5
+    assert reporter.scroll_start == 6
+    assert reporter.scroll_end == 20
+
+    # Old dashboard rows 1..8 (including rows 6..8 which are now part of the scrolling region!)
+    # must be erased with \033[2K before setting the new scroll region \033[6;20r
+    shrink_region_idx = out_shrink.index("\033[6;20r")
+    for r in range(1, 9):
+        erase_seq = f"\033[{r};1H\033[2K"
+        assert erase_seq in out_shrink
+        assert out_shrink.index(erase_seq) < shrink_region_idx
+    assert "\033[20;1H\0337\033[s" in out_shrink
+
+    # Nothing may be drawn or addressed beyond row 20 (the shrunk terminal height)
+    addressed_rows = [int(m) for m in re.findall(r"\x1b\[(\d+);1H", out_shrink)]
+    assert addressed_rows
+    assert max(addressed_rows) <= 20
+
+
+def test_split_screen_dashboard_tiny_terminal_shrink_clamps_safely():
+    """Verify that when terminal shrinks to a very small height, status_start >= 1
+    and no output is written past term_lines.
+    """
+    import io
+    import re
+    import time
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+    )
+
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 24))):
+        reporter.enable_split_screen()
+
+    stream.seek(0)
+    stream.truncate(0)
+
+    # Shrink to only 4 lines high
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((40, 4))):
+        reporter.render_split_dashboard()
+
+    out = stream.getvalue()
+    assert reporter.status_start >= 1
+    assert reporter.scroll_end >= 1
+    addressed_rows = [int(m) for m in re.findall(r"\x1b\[(\d+);1H", out)]
+    assert addressed_rows
+    assert min(addressed_rows) >= 1
+    assert max(addressed_rows) <= 4
+
+
+def test_generate_job_script_silences_internal_progress_lines_on_windows(tmp_path):
+    """Verify that on Windows, internal START/DONE/FAIL echoes use @ and re-assert @echo off
+    so child scripts running 'echo on' do not leak LBS bookkeeping lines to console/logs.
+    """
+    from lbs.runner import _generate_job_script, CommandTask
+
+    tasks = [
+        CommandTask(index=0, phase="sync", command="echo on"),
+        CommandTask(index=1, phase="sync", command="echo hello"),
+    ]
+    prog_path = tmp_path / "lbs_prog.log"
+    script = _generate_job_script(
+        commands=["echo on", "echo hello"],
+        tasks=tasks,
+        progress_path=prog_path,
+        is_win=True,
+    )
+
+    assert f'@>>"{prog_path}" echo START:0' in script
+    assert f'@>>"{prog_path}" echo DONE:0:0' in script
+    assert f'@>>"{prog_path}" echo START:1' in script
+    assert "@if %ERRORLEVEL% neq 0 (" in script
+    assert script.count("@echo off") >= 2
+
+
 
 
 
