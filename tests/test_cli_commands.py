@@ -1239,3 +1239,112 @@ def test_cli_status_phased_failure_and_disabled(tmp_path):
     assert "sync: DONE, compile: FAILED at cmd 3" in status_res.stdout
     assert "[OFF]" in status_res.stdout
     assert "(disabled: build_it is false)" in status_res.stdout
+
+
+def test_cli_clean_status_list_and_run_with_missing_cwd(tmp_path):
+    """Verify clean, status, list, validate, and filtered run handle missing cwd directories."""
+    config_file = tmp_path / "clean_asb.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    missing_disabled_dir = tmp_path / "missing_disabled_clone"
+    missing_enabled_dir = tmp_path / "missing_enabled_clone"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    # 1. Config with a disabled job whose cwd does not exist
+    config_disabled_missing = {
+        "settings": {"log_dir": str(log_dir)},
+        "jobs": [
+            {
+                "name": "asb-c-main",
+                "cwd": str(workspace_dir),
+                "build_it": True,
+                "commands": [f'"{sys.executable}" -c "print(1)"'],
+            },
+            {
+                "name": "asb-c-third",
+                "cwd": str(missing_disabled_dir),
+                "build_it": False,
+                "commands": ["echo third"],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_disabled_missing, sort_keys=False), encoding="utf-8")
+
+    # Validate should succeed when the missing cwd belongs to a build_it: false job
+    val_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "validate", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert val_res.returncode == 0
+
+    # Clean should succeed when the missing cwd belongs to a build_it: false job
+    status_file = log_dir / "lbs_status_clean_asb.json"
+    status_file.write_text('{"jobs": {}}', encoding="utf-8")
+    clean_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "clean", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert clean_res.returncode == 0
+    assert f"Cleared saved session state for {config_file}." in clean_res.stdout
+    assert not status_file.exists()
+
+    # 2. Even if an enabled job's cwd was deleted on disk, clean, list, status, and filtered run (-j) work
+    config_enabled_missing = {
+        "settings": {"log_dir": str(log_dir)},
+        "jobs": [
+            {
+                "name": "asb-c-main",
+                "cwd": str(workspace_dir),
+                "build_it": True,
+                "commands": [f'"{sys.executable}" -c "print(1)"'],
+            },
+            {
+                "name": "asb-deleted-enabled",
+                "cwd": str(missing_enabled_dir),
+                "build_it": True,
+                "commands": ["echo deleted"],
+            },
+        ],
+    }
+    config_file.write_text(yaml.safe_dump(config_enabled_missing, sort_keys=False), encoding="utf-8")
+
+    list_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "list", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert list_res.returncode == 0
+    assert list_res.stdout.strip().splitlines() == ["asb-c-main", "asb-deleted-enabled"]
+
+    run_filtered_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "run", str(config_file), "-j", "asb-c-main"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert run_filtered_res.returncode == 0
+
+    status_res = subprocess.run(
+        [sys.executable, "-m", "lbs", "status", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert status_res.returncode == 1  # asb-deleted-enabled was skipped
+    assert "asb-c-main" in status_res.stdout
+
+    clean_res2 = subprocess.run(
+        [sys.executable, "-m", "lbs", "clean", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert clean_res2.returncode == 0
+    assert f"Cleared saved session state for {config_file}." in clean_res2.stdout
+
