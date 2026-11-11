@@ -19,6 +19,8 @@ import sys
 import threading
 import time
 
+from lbs.utils.sanitizer import sanitize_console_output
+
 
 def _terminate_process(process: subprocess.Popen) -> None:
     """Safely and recursively terminates an entire process tree across platforms."""
@@ -34,7 +36,8 @@ def _terminate_process(process: subprocess.Popen) -> None:
         # 2. Forcefully kill the entire process tree via taskkill
         try:
             subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                ["taskkill", "/F", "/T", "/PID",
+                 str(process.pid)],
                 capture_output=True,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -89,14 +92,16 @@ class JobExecutor:
         self.stream_lock = stream_lock
 
     def _write_stdout(self, text: str) -> None:
-        if self.verbose:
-            with self.stream_lock if self.stream_lock is not None else nullcontext():
+        if self.verbose and text:
+            with self.stream_lock if self.stream_lock is not None else nullcontext(
+            ):
                 sys.stdout.write(text)
                 sys.stdout.flush()
 
     def _write_stderr_error(self, message: str) -> None:
         if self.verbose:
-            with self.stream_lock if self.stream_lock is not None else nullcontext():
+            with self.stream_lock if self.stream_lock is not None else nullcontext(
+            ):
                 print(f"[ERROR] {message}", file=sys.stderr)
 
     def run_command(
@@ -203,12 +208,13 @@ class JobExecutor:
                         break
 
                     decoded_line = line_bytes.decode("utf-8", errors="replace")
+                    sanitized_line = sanitize_console_output(decoded_line)
 
                     if log_file:
-                        log_file.write(decoded_line)
+                        log_file.write(sanitized_line)
                         log_file.flush()
 
-                    self._write_stdout(decoded_line)
+                    self._write_stdout(sanitized_line)
 
                 if timed_out:
                     _terminate_process(process)
@@ -243,10 +249,11 @@ class JobExecutor:
 
                         decoded_line = line_bytes.decode("utf-8",
                                                          errors="replace")
+                        sanitized_line = sanitize_console_output(decoded_line)
                         if log_file:
-                            log_file.write(decoded_line)
+                            log_file.write(sanitized_line)
                             log_file.flush()
-                        self._write_stdout(decoded_line)
+                        self._write_stdout(sanitized_line)
 
                     process.wait()
                     exit_code = process.returncode

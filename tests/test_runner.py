@@ -827,16 +827,21 @@ def test_queue_progress_reporter_split_screen_enable_disable():
     reporter.enable_split_screen()
     assert reporter.split_active is True
     val = stream.getvalue()
-    # Check that DECSTBM scrolling region is set (e.g. \033[1;...r)
-    assert f"\033[1;{reporter.scroll_end}r" in val
+    # Check that screen and scrollback are cleared and cursor homed before setting scroll region
+    clear_seq = "\033[2J\033[3J\033[H"
+    region_seq = f"\033[1;{reporter.scroll_end}r"
+    assert clear_seq in val
+    assert region_seq in val
+    assert val.index(clear_seq) < val.index(region_seq)
     assert "\033[1;1H" in val
 
     # Test clean disable and full-margin restoration
     reporter.disable_split_screen()
     assert reporter.split_active is False
     val2 = stream.getvalue()
-    # Check that margins reset to full screen (\033[r)
+    # Check that margins reset to full screen (\033[r) and cursor is visible on a fresh cleared line
     assert "\033[r" in val2
+    assert "\033[?25h\n\033[K" in val2
 
 
 def test_queue_progress_reporter_split_screen_dashboard_render():
@@ -876,8 +881,9 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
     # Hides cursor and saves cursor position
     assert "\033[?25l" in val
     assert "\033[s" in val or "\0337" in val
-    # Writes to row status_start
+    # Writes to row status_start and erases to end of line (\033[K)
     assert f"\033[{reporter.status_start};1H" in val
+    assert "\033[K" in val
     # Restores cursor and shows cursor
     assert "\033[u" in val or "\0338" in val
     assert "\033[?25h" in val
@@ -1150,5 +1156,58 @@ def test_queue_progress_reporter_scheduled_tasks_progress_on_resume():
     # 2 of 2 completed -> 100% progress
     assert reporter.completed_commands == 2
     assert reporter._get_progress_percent() == 100
+
+
+def test_split_screen_reproduction_with_clink_and_ansi_job_output(tmp_path, capsys):
+    """Reproduce a job printing Clink backspace sequences, bare CRs, and ANSI/OSC escapes
+    while split-screen dashboard is active, confirming output is sanitized and dashboard stays intact.
+    """
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter
+
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir), verbose=True)
+
+    # Script emitting Clink AutoRun backspace sequences, ANSI cursor/scroll manipulation attempts, and bare CR
+    clink_script = tmp_path / "clink_sim.py"
+    clink_script.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write("
+        "b'C\\x08L\\x08I\\x08N\\x08K\\x08 \\x08(.venv) C\\x08L\\x08I\\x08N\\x08K\\x08 \\x08c:\\\\sources>'\n"
+        "b'\\x1b[1;1H\\x1b[2JHEAD is now at 9f8e7d6\\r\\n'\n"
+        "b'Submodule path \\'depot_tools\\': checked out \\'12345\\'\\rRemoving avast.bat\\r\\n'"
+        ")\n"
+        "sys.stdout.buffer.flush()\n",
+        encoding="utf-8",
+    )
+
+    py_cmd = f'"{sys.executable}" "{clink_script}"'
+    jobs = [Job(name="asb-c-main", cwd=str(tmp_path), commands=[py_cmd])]
+    config = Config(settings=settings, jobs=jobs)
+
+    orig_init = _QueueProgressReporter.__init__
+
+    def force_tty_init(self, *args, **kwargs):
+        kwargs["force_tty"] = True
+        orig_init(self, *args, **kwargs)
+
+    with patch.object(_QueueProgressReporter, "__init__", force_tty_init):
+        success = run_scheduler(config)
+
+    assert success is True
+    captured = capsys.readouterr()
+
+    # 1. Screen clear sequence was emitted at start of split screen
+    assert "\033[2J\033[3J\033[H" in captured.out
+    # 2. Child's Clink backspaces were collapsed and child's rogue \x1b[1;1H\x1b[2J was stripped
+    assert "\x08" not in captured.out
+    assert "(.venv) c:\\sources>HEAD is now at 9f8e7d6\n" in captured.out
+    assert "Submodule path 'depot_tools': checked out '12345'\nRemoving avast.bat\n" in captured.out
+    assert "Removing avast.batpot_tools" not in captured.out
+    # 3. Dashboard rows were rendered with \033[K line erase and scroll region was cleanly restored at the end
+    assert "'asb-c-main'" in captured.out
+    assert "\033[K" in captured.out
+    assert "\033[r" in captured.out
+
 
 

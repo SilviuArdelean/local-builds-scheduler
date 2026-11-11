@@ -205,3 +205,68 @@ def test_executor_stream_lock_synchronization(tmp_path):
     assert mock_lock.__exit__.called
 
 
+def test_sanitize_console_output_clink_backspaces():
+    """Verify that Clink backspace sequences collapse cleanly within each line."""
+    from lbs.utils.sanitizer import sanitize_console_output
+
+    raw = "C\bL\bI\bN\bK\b \b(.venv) C\bL\bI\bN\bK\b \bc:\\sources\\browser-chromium>\r\n"
+    assert sanitize_console_output(raw) == "(.venv) c:\\sources\\browser-chromium>\n"
+
+    # Leading backspaces do not erase across line boundaries
+    assert sanitize_console_output("line1\n\b\bline2\n") == "line1\nline2\n"
+    assert sanitize_console_output("\b\babc\b\b12") == "a12"
+
+
+def test_sanitize_console_output_esc_sequences_and_controls():
+    """Verify stripping of CSI, OSC, DEC save/restore, and C0 controls while preserving \\n and \\t."""
+    from lbs.utils.sanitizer import sanitize_console_output
+
+    # CSI color + cursor positioning + OSC title + ST-terminated OSC + DEC save/restore
+    raw = (
+        "\x1b]0;Clink Title\x07"
+        "\x1b]9;4;1;50\x1b\\"
+        "\x1b7\x1b[1;1H\x1b[32mHEAD is now at 1234567\x1b[0m\x1b8"
+        "X\b\tDone\x00\x07\x0b\x0c\x1f\x7f\r\n"
+    )
+    assert sanitize_console_output(raw) == "HEAD is now at 1234567\tDone\n"
+
+
+def test_sanitize_console_output_cr_normalization():
+    """Verify normalization of \\r\\n, \\r\\r\\n, and bare \\r into clean newlines."""
+    from lbs.utils.sanitizer import sanitize_console_output
+
+    raw = (
+        "Submodule path 'depot_tools': checked out 'abc'\r"
+        "Removing avast.bat\r\r\n"
+        "Done\r"
+    )
+    assert sanitize_console_output(raw) == (
+        "Submodule path 'depot_tools': checked out 'abc'\n"
+        "Removing avast.bat\n"
+        "Done\n"
+    )
+
+
+def test_executor_sanitizes_clink_and_ansi_from_child_output(tmp_path, capsys):
+    """Verify that JobExecutor sanitizes Clink backspaces, ANSI sequences, and bare CRs in console and log."""
+    executor = JobExecutor(verbose=True)
+    log_file = io.StringIO()
+
+    py_cmd = (
+        f'"{sys.executable}" -c "import sys; '
+        r"sys.stdout.buffer.write(b'C\x08L\x08I\x08N\x08K\x08 \x08\x1b[31mSubmodule out\x1b[0m\rRemoving avast.bat\r\n'); "
+        'sys.stdout.buffer.flush()"'
+    )
+
+    result = executor.run_command(py_cmd, cwd=str(tmp_path), log_file=log_file)
+    assert result.success is True
+
+    captured = capsys.readouterr()
+    expected = "Submodule out\nRemoving avast.bat\n"
+    assert captured.out == expected
+    assert log_file.getvalue() == expected
+    assert "\x08" not in captured.out
+    assert "\x1b" not in captured.out
+
+
+
