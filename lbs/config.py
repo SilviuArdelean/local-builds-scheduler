@@ -122,7 +122,11 @@ def _validate_job_metadata(
     return name
 
 
-def _validate_job_cwd_and_commands(job_data: dict, name: str) -> None:
+def _validate_job_cwd_and_commands(
+    job_data: dict,
+    name: str,
+    check_cwd: bool = True,
+) -> None:
     """Validates the cwd and commands list or phases dictionary for a job."""
     # Working Directory (CWD)
     if "cwd" not in job_data:
@@ -131,7 +135,7 @@ def _validate_job_cwd_and_commands(job_data: dict, name: str) -> None:
     if not isinstance(cwd, str) or not cwd.strip():
         raise ConfigError(
             f"Job '{name}' 'cwd' field must be a non-empty string")
-    if not Path(cwd).is_dir():
+    if check_cwd and not Path(cwd).is_dir():
         raise ConfigError(
             f"Job '{name}' 'cwd' directory does not exist: {cwd}")
 
@@ -232,13 +236,22 @@ def _validate_job_options(job_data: dict, name: str) -> None:
                 f"Job '{name}' 'build_it' field must be a boolean")
 
 
-def _validate_job(job_data: dict, idx: int, seen_names: set[str]) -> None:
+def _validate_job(
+    job_data: dict,
+    idx: int,
+    seen_names: set[str],
+    check_cwd: bool = True,
+    job_filter_set: set[str] | None = None,
+) -> None:
     if not isinstance(job_data, dict):
         raise ConfigError(f"Job at index {idx} must be a dictionary")
 
     name = _validate_job_metadata(job_data, idx, seen_names)
-    _validate_job_cwd_and_commands(job_data, name)
     _validate_job_options(job_data, name)
+    is_enabled = job_data.get("build_it", True) is True
+    is_selected = job_filter_set is None or name in job_filter_set
+    should_check_cwd = check_cwd and is_enabled and is_selected
+    _validate_job_cwd_and_commands(job_data, name, check_cwd=should_check_cwd)
 
 
 def _validate_email_config(email_data: dict) -> None:
@@ -439,8 +452,24 @@ def _read_and_merge_config(path: Path,
     return _expand_env_vars(data)
 
 
-def validate_config(path: str | Path,
-                    notifications_path: str | Path | None = None) -> None:
+def _normalize_job_filter(
+    job_filter: list[str] | set[str] | str | None,
+) -> set[str] | None:
+    """Normalizes an optional job filter into a non-empty set of job names or None."""
+    if job_filter is None:
+        return None
+    if isinstance(job_filter, str):
+        return {job_filter} if job_filter else None
+    filter_set = set(job_filter)
+    return filter_set if filter_set else None
+
+
+def validate_config(
+    path: str | Path,
+    notifications_path: str | Path | None = None,
+    check_cwd: bool = True,
+    job_filter: list[str] | set[str] | str | None = None,
+) -> None:
     """
     Validate that the config file at path exists, is valid YAML, and meets LBS constraints.
     
@@ -466,16 +495,27 @@ def validate_config(path: str | Path,
 
     # Validate each job
     seen_names = set()
+    job_filter_set = _normalize_job_filter(job_filter)
     for idx, job_data in enumerate(jobs_data):
-        _validate_job(job_data, idx, seen_names)
+        _validate_job(
+            job_data,
+            idx,
+            seen_names,
+            check_cwd=check_cwd,
+            job_filter_set=job_filter_set,
+        )
 
     # Validate Settings (Optional)
     if "settings" in data:
         _validate_settings(data["settings"])
 
 
-def load_config(path: str | Path,
-                notifications_path: str | Path | None = None) -> Config:
+def load_config(
+    path: str | Path,
+    notifications_path: str | Path | None = None,
+    check_cwd: bool = True,
+    job_filter: list[str] | set[str] | str | None = None,
+) -> Config:
     """
     Load and parse config from path, applying default values where applicable.
     
@@ -483,7 +523,12 @@ def load_config(path: str | Path,
         ConfigError: If validation fails.
     """
     config_path = Path(path)
-    validate_config(config_path, notifications_path=notifications_path)
+    validate_config(
+        config_path,
+        notifications_path=notifications_path,
+        check_cwd=check_cwd,
+        job_filter=job_filter,
+    )
 
     data = _read_and_merge_config(config_path, notifications_path)
 

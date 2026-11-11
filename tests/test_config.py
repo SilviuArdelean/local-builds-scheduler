@@ -896,4 +896,81 @@ def test_resolve_status_path():
     assert p5 == Path("logs/lbs_status.json")
 
 
+def test_disabled_job_skips_cwd_existence_check(tmp_path):
+    """A job with build_it: false should not fail validation when its cwd does not exist on disk."""
+    config_file = tmp_path / "disabled_missing_cwd.yaml"
+    workspace_dir = tmp_path / "existing_workspace"
+    workspace_dir.mkdir()
+    missing_dir = tmp_path / "deleted_clone"
+
+    yaml_content = f"""
+    jobs:
+      - name: active-job
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo active"]
+        build_it: true
+      - name: disabled-job
+        cwd: "{missing_dir.as_posix()}"
+        commands: ["echo disabled"]
+        build_it: false
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    config = load_config(config_file)
+    assert len(config.jobs) == 2
+    assert config.jobs[1].name == "disabled-job"
+    assert config.jobs[1].build_it is False
+
+    # Schema validation still applies to disabled jobs (e.g. empty cwd string)
+    bad_schema_file = tmp_path / "disabled_empty_cwd.yaml"
+    bad_schema_file.write_text("""
+    jobs:
+      - name: disabled-job
+        cwd: "   "
+        commands: ["echo disabled"]
+        build_it: false
+    """, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(bad_schema_file)
+    assert "cwd' field must be a non-empty string" in str(exc.value)
+
+
+def test_load_config_check_cwd_false_and_job_filter(tmp_path):
+    """Verify check_cwd=False and job_filter skip disk existence checks as expected."""
+    config_file = tmp_path / "multi_cwd.yaml"
+    workspace_dir = tmp_path / "existing_workspace"
+    workspace_dir.mkdir()
+    missing_dir = tmp_path / "missing_workspace"
+
+    yaml_content = f"""
+    jobs:
+      - name: job-present
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo present"]
+      - name: job-missing
+        cwd: "{missing_dir.as_posix()}"
+        commands: ["echo missing"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    # 1. Default check_cwd=True without filter fails on job-missing
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file)
+    assert "Job 'job-missing' 'cwd' directory does not exist" in str(exc.value)
+
+    # 2. check_cwd=False succeeds even though job-missing is enabled and missing on disk
+    config_no_check = load_config(config_file, check_cwd=False)
+    assert len(config_no_check.jobs) == 2
+
+    # 3. job_filter=["job-present"] succeeds because job-missing is not selected
+    config_filtered = load_config(config_file, job_filter=["job-present"])
+    assert len(config_filtered.jobs) == 2
+
+    # 4. job_filter=["job-missing"] fails because the selected job's cwd is missing
+    with pytest.raises(ConfigError) as exc2:
+        load_config(config_file, job_filter=["job-missing"])
+    assert "Job 'job-missing' 'cwd' directory does not exist" in str(exc2.value)
+
+
+
 

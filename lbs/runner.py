@@ -2099,7 +2099,7 @@ class Scheduler:
     ) -> tuple[str, int]:
         """Inspects saved session status for a configuration without executing."""
         if config is None and config_path is not None:
-            config = load_config(config_path)
+            config = load_config(config_path, check_cwd=False)
 
         resolved_log_dir = log_dir
         if resolved_log_dir is None:

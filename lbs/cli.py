@@ -99,9 +99,12 @@ def _should_trigger_shutdown(config: Config, config_path: str) -> bool:
 def cmd_run(args: argparse.Namespace) -> None:
     """Handle the 'lbs run <config>' subcommand."""
     try:
-        config = load_config(args.config,
-                             notifications_path=getattr(
-                                 args, "notifications_config", None))
+        load_kwargs = {
+            "notifications_path": getattr(args, "notifications_config", None),
+        }
+        if getattr(args, "job", None):
+            load_kwargs["job_filter"] = args.job
+        config = load_config(args.config, **load_kwargs)
         if config is not None:
             if not getattr(args, "notifications", False):
                 config.settings.notifications.on_success = False
@@ -164,7 +167,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
 def cmd_list(args: argparse.Namespace) -> None:
     """Handle the 'lbs list <config>' subcommand."""
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, check_cwd=False)
         for job in config.jobs:
             print(job.name)
         sys.exit(0)
@@ -176,7 +179,7 @@ def cmd_list(args: argparse.Namespace) -> None:
 def cmd_clean(args: argparse.Namespace) -> None:
     """Handle the 'lbs clean <config>' subcommand."""
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, check_cwd=False)
         log_dir = config.settings.log_dir
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -206,7 +209,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     """Handle the 'lbs status <config>' subcommand."""
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, check_cwd=False)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
