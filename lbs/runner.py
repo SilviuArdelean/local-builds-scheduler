@@ -25,6 +25,7 @@ import time
 from lbs.config import Config, Job, BuildStatus, resolve_status_path, load_config
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
+from lbs.utils.sanitizer import sanitize_console_output
 
 
 @dataclass
@@ -1455,6 +1456,8 @@ class _QueueProgressReporter:
                 except Exception:
                     pass
 
+            # Clear screen, scrollback buffer, and home cursor before setting scroll region
+            self.stream.write("\033[2J\033[3J\033[H")
             # Set top scrolling margin
             self.stream.write(f"\033[1;{self.scroll_end}r")
             self.stream.write("\033[1;1H")
@@ -1469,8 +1472,8 @@ class _QueueProgressReporter:
                 # Reset scrolling margins to full terminal height
                 self.stream.write("\033[r")
                 _, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-                # Move cursor to bottom row and ensure visible
-                self.stream.write(f"\033[{term_lines};1H\033[?25h\n")
+                # Move cursor to bottom row, ensure visible, and move to a fresh clear line below dashboard
+                self.stream.write(f"\033[{term_lines};1H\033[?25h\n\033[K")
                 self.stream.flush()
             except Exception:
                 pass
@@ -1554,7 +1557,7 @@ class _QueueProgressReporter:
                 line = line[:term_cols - 1]
 
             pad = max(0, self.last_rendered_len - len(line))
-            self.stream.write(f"\r{line}{' ' * pad}")
+            self.stream.write(f"\r{line}{' ' * pad}\033[K")
             self.stream.flush()
             self.last_rendered_len = len(line)
             self.active_bar_active = True
@@ -1562,7 +1565,7 @@ class _QueueProgressReporter:
     def clear_quiet_bar(self) -> None:
         with self.lock:
             if self.is_quiet and self.is_tty and self.active_bar_active:
-                self.stream.write(f"\r{' ' * self.last_rendered_len}\r")
+                self.stream.write(f"\r{' ' * self.last_rendered_len}\033[K\r")
                 self.stream.flush()
                 self.last_rendered_len = 0
                 self.active_bar_active = False
@@ -1571,6 +1574,9 @@ class _QueueProgressReporter:
         with self.lock:
             if not self.split_active or not self.is_tty or self.is_quiet:
                 return
+
+            # 1. Hide cursor, save cursor position (both DEC \0337 and ANSI \033[s)
+            self.stream.write("\033[?25l\0337\033[s")
 
             term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
             # Handle dynamic terminal resize
@@ -1591,7 +1597,8 @@ class _QueueProgressReporter:
 
             phase_part = f" (phase '{self.current_phase_name}')" if self.current_phase_name and self.current_phase_name != "default" else ""
             cmd_part = f"[{self.current_cmd_idx}/{self.current_phase_cmd_total}]" if self.current_phase_cmd_total > 0 else ""
-            cmd_text = self.current_command_text.strip() if self.current_command_text else ""
+            raw_cmd_text = sanitize_console_output(self.current_command_text or "")
+            cmd_text = raw_cmd_text.replace("\n", " ").replace("\t", " ").strip()
             avail_cmd = max(10, term_cols - 25)
             if len(cmd_text) > avail_cmd:
                 cmd_text = cmd_text[:avail_cmd - 3] + "..."
@@ -1614,18 +1621,17 @@ class _QueueProgressReporter:
             if self.status_lines_count >= 7:
                 dashboard_lines.append(divider_line)
 
-            # Draw to the bottom region without touching the top scrolling area
-            # 1. Hide cursor, save cursor position (both ANSI \033[s and DEC \0337)
-            self.stream.write("\033[?25l\0337\033[s")
+            # Draw to the bottom region without touching the top scrolling area,
+            # erasing to end of line (\033[K) on every row.
             for idx, d_line in enumerate(dashboard_lines):
                 row = self.status_start + idx
                 if len(d_line) >= term_cols:
                     d_line = d_line[:term_cols - 1]
-                self.stream.write(f"\033[{row};1H\033[2K{d_line}")
+                self.stream.write(f"\033[{row};1H{d_line}\033[K")
 
             # Clear any remaining lines in the status pane
             for row in range(self.status_start + len(dashboard_lines), term_lines + 1):
-                self.stream.write(f"\033[{row};1H\033[2K")
+                self.stream.write(f"\033[{row};1H\033[K")
 
             # 2. Restore cursor back to the scrolling region (both ANSI \033[u and DEC \0338), show cursor
             self.stream.write("\033[u\0338\033[?25h")
