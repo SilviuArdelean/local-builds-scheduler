@@ -243,62 +243,9 @@ The tool exits with explicit, predictable codes:
 
 ---
 
-## Advanced Capabilities
-
-### Single-Instance Prevention (Concurrency Lock)
-
-To prevent multiple scheduler instances from writing to the same logs or executing builds concurrently, LBS secures an exclusive file lock (`lbs.lock`) in the configured log directory (`log_dir`). If a secondary instance attempts to run using a configuration pointing to the same log directory, it will terminate immediately with a clean error message and exit code `2`.
-
-### Session Resuming (`--resume latest`)
-
-LBS automatically tracks granular execution progress inside a `lbs_status_<config>.json` file (with `lbs_state.json` fallback) created inside the `log_dir`. 
-
-If a build fails, or the scheduler is interrupted (e.g., `Ctrl+C`), you can rerun the exact same command adding the `--resume latest` flag:
-```bash
-lbs run config.yaml --resume latest
-```
-This reads the saved status file and:
-1. Reconstructs the status of all jobs and individual commands from the previous session.
-2. Skips all jobs that have already completed with a `SUCCESS` status.
-3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
-4. If all selected jobs had already succeeded, it outputs a status message and exits immediately.
-
-### Inspecting Build Queue State (`lbs status`)
-
-To check the exact state of an overnight, interrupted, or completed build without executing any commands or altering saved state:
-```bash
-lbs status config.yaml
-```
-Output:
-```
-LBS Session Status: config.yaml
-Profile State: logs/lbs_status_config.json
-Session Started: 2026-10-22 23:15:00 | Last Updated: 2026-10-23 01:42:10
-Outcome: FAILED (Halted on job 'chromium-debug', phase 'compile')
-
-Jobs:
-  [PASS] chromium-release    (sync: DONE, compile: DONE)           took 01:45:12
-  [FAIL] chromium-debug      (sync: DONE, compile: FAILED at cmd 3) took 00:42:01
-  [SKIP] package-artifacts   (not started, aborted by failure)     (-)
-  [OFF]  upload-symbols      (disabled: build_it is false)         (-)
-
-Action:
-  To resume from the failed step, run:
-    lbs run config.yaml --resume latest
-```
-Pass `--json` for machine-readable JSON output in CI or automated pipelines.
-
-### Discarding Stale Resume State (`--fresh` and `lbs clean`)
-
-When an earlier run was aborted, corrupted, or you wish to re-run the entire build pipeline from scratch:
-- **`lbs run config.yaml --fresh`** (or `--ignore-saved-state`): Resets saved state before execution begins and runs all jobs from the beginning. Cannot be combined with `--resume`.
-- **`lbs clean config.yaml`**: Removes `logs/lbs_status_<config>.json` and temporary session files without launching a build. Confirms: `Cleared saved session state for config.yaml.` (or `No saved session state found for config.yaml. Nothing to clean.`).
-
----
-
 ## Emergency / Recovery Playbook
 
-A quick checklist for when an overnight or long-running session fails, gets interrupted, or you need to step in mid-run.
+A checklist for when an overnight or long-running session fails, gets interrupted, or you need to step in mid-run — covering both what to do and the mechanics behind `lbs`'s recovery features.
 
 ### 0. Activate the virtual environment first
 
@@ -315,7 +262,24 @@ If `lbs` isn't found afterwards, activation likely failed silently (see the Powe
 ```bash
 lbs status config.yaml
 ```
-Shows per-job, per-command outcomes from the saved state without touching anything. Always check this before deciding how to recover — the failure might be one command deep into one job, not the whole thing.
+Reads the saved `lbs_status_<config>.json` file (with `lbs_state.json` fallback) and shows per-job, per-command outcomes without touching anything:
+```
+LBS Session Status: config.yaml
+Profile State: logs/lbs_status_config.json
+Session Started: 2026-10-22 23:15:00 | Last Updated: 2026-10-23 01:42:10
+Outcome: FAILED (Halted on job 'chromium-debug', phase 'compile')
+
+Jobs:
+  [PASS] chromium-release    (sync: DONE, compile: DONE)           took 01:45:12
+  [FAIL] chromium-debug      (sync: DONE, compile: FAILED at cmd 3) took 00:42:01
+  [SKIP] package-artifacts   (not started, aborted by failure)     (-)
+  [OFF]  upload-symbols      (disabled: build_it is false)         (-)
+
+Action:
+  To resume from the failed step, run:
+    lbs run config.yaml --resume latest
+```
+Pass `--json` for machine-readable output in CI or automated pipelines. Always check this before deciding how to recover — the failure might be one command deep into one job, not the whole thing.
 
 ### 2. Preview before you commit hours of build time
 
@@ -329,21 +293,27 @@ Combine with whatever filters/flags you're about to use (`-j`, `-p`, `--resume`)
 ```bash
 lbs run config.yaml --mode sequential --resume latest
 ```
-`--resume latest` skips every job/command already `SUCCESS`/`DONE` and retries only what failed or never ran. Pairing it with `--mode sequential` keeps each job's own phases close together in time (a job's `build` starts right after its own `sync` instead of waiting behind other jobs' builds) — useful after a failure caused by something going stale or unreachable during a long wait between phases (e.g. a VPN/network drop during another job's multi-hour build).
+This reads the saved status file and:
+1. Reconstructs the status of all jobs and individual commands from the previous session.
+2. Skips all jobs that already completed with a `SUCCESS` status.
+3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
+4. If all selected jobs had already succeeded, it prints a status message and exits immediately.
+
+Pairing it with `--mode sequential` keeps each job's own phases close together in time (a job's `build` starts right after its own `sync` instead of waiting behind other jobs' builds) — useful after a failure caused by something going stale or unreachable during a long wait between phases (e.g. a VPN/network drop during another job's multi-hour build).
 
 ### 4. When saved state itself is the problem
 
 ```bash
-lbs run config.yaml --fresh    # discard state, rerun everything from scratch
+lbs run config.yaml --fresh    # (or --ignore-saved-state) discard state, rerun everything from scratch
 lbs clean config.yaml          # just wipe the saved state, don't run anything
 ```
-Use these instead of `--resume` when the config changed meaningfully or the saved state looks wrong, rather than "one job failed."
+Use these instead of `--resume` (mutually exclusive with it) when the config changed meaningfully or the saved state looks wrong, rather than "one job failed." `lbs clean` confirms with `Cleared saved session state for config.yaml.` (or `No saved session state found...` if there was nothing to clear).
 
 ### 5. Scope a run to just what you need
 
 ```bash
-lbs run config.yaml -j <job-name>              # only these job(s)
-lbs run config.yaml -p <phase-name>            # only this phase, across all active jobs
+lbs run config.yaml -j <job-name>               # only these job(s)
+lbs run config.yaml -p <phase-name>             # only this phase, across all active jobs
 lbs run config.yaml -p build -j <job-name>      # combine both
 lbs list config.yaml                            # reminder of job names
 ```
@@ -351,10 +321,14 @@ lbs list config.yaml                            # reminder of job names
 ### 6. Stepping away
 
 ```bash
-lbs run config.yaml -q                 # quiet mode: compact progress bar, full logs still on disk
+lbs run config.yaml -q                           # quiet mode: compact progress bar, full logs still on disk
 lbs run config.yaml --resume latest --shutdown   # power off automatically, only if the resumed session succeeds
 ```
 `--shutdown` is skipped on failure, on `--dry-run`, and if any enabled job was filtered out — so it won't power off mid-recovery by accident.
+
+### 7. "Another instance is already running"
+
+LBS secures an exclusive file lock (`lbs.lock`) in `log_dir` so two instances can't write to the same logs or build concurrently. If you hit this error and nothing is actually running, delete the stale `lbs.lock` file; otherwise close the other `lbs` session first.
 
 > **Don't reach for a build script's own `--no-sync`-style flag as a shortcut just because `lbs` already ran its `sync` phase.** A job's `build` step can still rely on that script's internal sync to do more than fetch — e.g. reapplying local patches that `lbs`'s own sync step resets. Skipping it can silently drop work that's unrelated to networking. Check what that flag actually gates in the underlying build script before assuming it's redundant.
 
