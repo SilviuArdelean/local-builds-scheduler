@@ -158,6 +158,8 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Quiet Run** | `lbs run config.yaml -q` | Suppresses live compiler output streaming to the terminal and renders an in-place updating single-line progress bar; logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
+| **Phase-Filtered Run** | `lbs run config.yaml -p sync` | Runs *only* the specified phase(s) (e.g. `sync`) across every active job. Can be combined with `-j`. |
+| **Sequential Mode** | `lbs run config.yaml --mode sequential` | Runs each job to completion (all of its phases) before starting the next job, instead of running one phase across every job before moving to the next phase. Keeps a job's own phases close together in time. |
 | **Resume Interrupted Run** | `lbs run config.yaml --resume latest` | Loads the state from `lbs_status_<config>.json` and executes only the incomplete (failed, partial, aborted, or skipped) jobs from the previous session. |
 | **Fresh Run** | `lbs run config.yaml --fresh` | Discards any existing saved session state and starts all jobs from the beginning without requiring manual state file deletion. |
 | **Inspect Session Status** | `lbs status config.yaml` | Inspects saved build queue status without executing, displaying per-job outcomes, phase details, elapsed times, and resume suggestions. |
@@ -187,6 +189,8 @@ lbs run <config-path> [options]
 **Options:**
 * `-q`, `--quiet` — Suppress live command execution output from being streamed to the console and display an in-place updating single-line progress bar (full logs are still recorded to disk under `log_dir`, and the final summary table is still printed).
 * `-j <job-name>`, `--job <job-name>` — Filter to run *only* the specified job. Can be specified multiple times (e.g. `lbs run config.yaml -j compile -j test`).
+* `-p <phase-name>`, `--phase <phase-name>` — Filter to run *only* the specified phase (for configs using multi-phase `phases:` jobs). Can be specified multiple times and combined with `-j`.
+* `--mode phased|sequential` — Execution strategy across jobs. `phased` (default) runs each phase across every active job before moving to the next phase (e.g. every job's `sync`, then every job's `build`). `sequential` instead runs every phase of one job to completion before starting the next job — use this to keep a job's own phases close together in time, e.g. so a job's `build` step starts right after its own `sync` instead of waiting behind other jobs' builds.
 * `--dry-run` — Print the execution plan (log paths, environment variables, commands, retries, and timeouts) without running any commands.
 * `--resume latest` — Resume an interrupted or failed session from the latest saved state (`lbs_state.json`), executing only the incomplete (failed, partial, aborted, or skipped) jobs.
 * `--fresh`, `--ignore-saved-state` — Discard any existing saved session state (`lbs_status_<config>.json`) and temporary session files, executing all jobs from the beginning. Mutually exclusive with `--resume`.
@@ -289,6 +293,70 @@ Pass `--json` for machine-readable JSON output in CI or automated pipelines.
 When an earlier run was aborted, corrupted, or you wish to re-run the entire build pipeline from scratch:
 - **`lbs run config.yaml --fresh`** (or `--ignore-saved-state`): Resets saved state before execution begins and runs all jobs from the beginning. Cannot be combined with `--resume`.
 - **`lbs clean config.yaml`**: Removes `logs/lbs_status_<config>.json` and temporary session files without launching a build. Confirms: `Cleared saved session state for config.yaml.` (or `No saved session state found for config.yaml. Nothing to clean.`).
+
+---
+
+## Emergency / Recovery Playbook
+
+A quick checklist for when an overnight or long-running session fails, gets interrupted, or you need to step in mid-run.
+
+### 0. Activate the virtual environment first
+
+Every command below assumes an active venv in your current shell — this doesn't persist between terminal sessions, so it's the first thing to do each time you open a new one:
+
+* **Windows (PowerShell)**: `.venv\Scripts\activate`
+* **Windows (Command Prompt)**: `.venv\Scripts\activate.bat`
+* **POSIX (Linux/macOS)**: `source .venv/bin/activate`
+
+If `lbs` isn't found afterwards, activation likely failed silently (see the PowerShell execution-policy gotcha in the [Kickstart Guide](docs/kickstart.md)) — you can always bypass it and call the venv's `lbs` directly: `.venv\Scripts\lbs.exe --version`.
+
+### 1. See what actually happened — don't guess
+
+```bash
+lbs status config.yaml
+```
+Shows per-job, per-command outcomes from the saved state without touching anything. Always check this before deciding how to recover — the failure might be one command deep into one job, not the whole thing.
+
+### 2. Preview before you commit hours of build time
+
+```bash
+lbs run config.yaml --dry-run
+```
+Combine with whatever filters/flags you're about to use (`-j`, `-p`, `--resume`) to confirm the plan only touches what you expect.
+
+### 3. Resume without redoing finished work
+
+```bash
+lbs run config.yaml --mode sequential --resume latest
+```
+`--resume latest` skips every job/command already `SUCCESS`/`DONE` and retries only what failed or never ran. Pairing it with `--mode sequential` keeps each job's own phases close together in time (a job's `build` starts right after its own `sync` instead of waiting behind other jobs' builds) — useful after a failure caused by something going stale or unreachable during a long wait between phases (e.g. a VPN/network drop during another job's multi-hour build).
+
+### 4. When saved state itself is the problem
+
+```bash
+lbs run config.yaml --fresh    # discard state, rerun everything from scratch
+lbs clean config.yaml          # just wipe the saved state, don't run anything
+```
+Use these instead of `--resume` when the config changed meaningfully or the saved state looks wrong, rather than "one job failed."
+
+### 5. Scope a run to just what you need
+
+```bash
+lbs run config.yaml -j <job-name>              # only these job(s)
+lbs run config.yaml -p <phase-name>            # only this phase, across all active jobs
+lbs run config.yaml -p build -j <job-name>      # combine both
+lbs list config.yaml                            # reminder of job names
+```
+
+### 6. Stepping away
+
+```bash
+lbs run config.yaml -q                 # quiet mode: compact progress bar, full logs still on disk
+lbs run config.yaml --resume latest --shutdown   # power off automatically, only if the resumed session succeeds
+```
+`--shutdown` is skipped on failure, on `--dry-run`, and if any enabled job was filtered out — so it won't power off mid-recovery by accident.
+
+> **Don't reach for a build script's own `--no-sync`-style flag as a shortcut just because `lbs` already ran its `sync` phase.** A job's `build` step can still rely on that script's internal sync to do more than fetch — e.g. reapplying local patches that `lbs`'s own sync step resets. Skipping it can silently drop work that's unrelated to networking. Check what that flag actually gates in the underlying build script before assuming it's redundant.
 
 ---
 
