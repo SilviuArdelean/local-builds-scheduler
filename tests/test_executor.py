@@ -285,5 +285,59 @@ def test_executor_sanitizes_once_per_chunk_and_write_stdout_is_pure(tmp_path):
     assert mock_sanitize.call_count == 1
 
 
+def test_executor_on_output_line_receives_sanitized_lines_in_order(tmp_path, capsys):
+    """Verify on_output_line receives sanitized output in order without altering stdout or log_file."""
+    executor = JobExecutor(verbose=True)
+    log_file = io.StringIO()
+    received: list[str] = []
+
+    py_cmd = (
+        f'"{sys.executable}" -c "import sys; '
+        r"sys.stdout.buffer.write(b'\x1b[32m[1/2] CXX a.obj\x1b[0m\r\n[2/2] LINK app\r\n'); "
+        'sys.stdout.buffer.flush()"'
+    )
+
+    result = executor.run_command(
+        py_cmd,
+        cwd=str(tmp_path),
+        log_file=log_file,
+        on_output_line=received.append,
+    )
+
+    assert result.success is True
+    combined = "".join(received)
+    expected = "[1/2] CXX a.obj\n[2/2] LINK app\n"
+    assert combined == expected
+    assert log_file.getvalue() == expected
+    assert capsys.readouterr().out == expected
+
+
+def test_executor_on_output_line_exception_does_not_break_execution(tmp_path):
+    """Verify errors inside on_output_line are isolated and never fail the command."""
+    executor = JobExecutor(verbose=False)
+    log_file = io.StringIO()
+    calls = 0
+
+    def flaky_callback(_line: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("parser bug")
+
+    py_cmd = f'"{sys.executable}" -c "print(\'line-1\'); print(\'line-2\')"'
+    result = executor.run_command(
+        py_cmd,
+        cwd=str(tmp_path),
+        log_file=log_file,
+        on_output_line=flaky_callback,
+    )
+
+    assert result.success is True
+    assert result.exit_code == 0
+    assert calls >= 1
+    assert "line-1" in log_file.getvalue()
+    assert "line-2" in log_file.getvalue()
+
+
+
 
 

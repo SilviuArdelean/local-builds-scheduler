@@ -7,6 +7,7 @@ lbs.ui – Terminal dashboard presentation layer.
 
 from __future__ import annotations
 
+from lbs.ui.progress_parser import BuildProgressParser
 from lbs.ui.state import (
     BuildProgress,
     DashboardSnapshot,
@@ -36,6 +37,7 @@ from lbs.ui.theme import (
 __all__ = [
     "ASCII_GLYPHS",
     "BuildProgress",
+    "BuildProgressParser",
     "CYAN",
     "DARK_GRAY",
     "DashboardSnapshot",
