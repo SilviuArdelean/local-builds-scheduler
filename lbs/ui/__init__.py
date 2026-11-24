@@ -7,6 +7,13 @@ lbs.ui – Terminal dashboard presentation layer.
 
 from __future__ import annotations
 
+from lbs.ui.dashboard import (
+    DashboardRenderer,
+    LayoutTier,
+    RenderProfile,
+    render_plain_milestone,
+    select_layout_tier,
+)
 from lbs.ui.progress_parser import BuildProgressParser
 from lbs.ui.state import (
     BuildProgress,
@@ -40,14 +47,17 @@ __all__ = [
     "BuildProgressParser",
     "CYAN",
     "DARK_GRAY",
+    "DashboardRenderer",
     "DashboardSnapshot",
     "ExecutionStatus",
     "GRAY",
     "GREEN",
     "GlyphSet",
+    "LayoutTier",
     "MAGENTA",
     "PALETTE",
     "RED",
+    "RenderProfile",
     "TEXT_PRIMARY",
     "UNICODE_GLYPHS",
     "YELLOW",
@@ -56,5 +66,7 @@ __all__ = [
     "format_hms",
     "get_glyphs",
     "highlight_command",
+    "render_plain_milestone",
+    "select_layout_tier",
     "status_color",
 ]
