@@ -22,6 +22,12 @@ from lbs.ui.state import (
     format_compact_duration,
     format_hms,
 )
+from lbs.ui.terminal import (
+    SplitViewportManager,
+    TerminalCapabilities,
+    detect_capabilities,
+    enable_windows_vt_processing,
+)
 from lbs.ui.theme import (
     ASCII_GLYPHS,
     CYAN,
@@ -58,10 +64,14 @@ __all__ = [
     "PALETTE",
     "RED",
     "RenderProfile",
+    "SplitViewportManager",
     "TEXT_PRIMARY",
+    "TerminalCapabilities",
     "UNICODE_GLYPHS",
     "YELLOW",
     "build_rich_theme",
+    "detect_capabilities",
+    "enable_windows_vt_processing",
     "format_compact_duration",
     "format_hms",
     "get_glyphs",
