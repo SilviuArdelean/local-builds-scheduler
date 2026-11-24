@@ -367,3 +367,45 @@ def test_scheduler_sequential_mode_failure_stop_on_failure(tmp_path):
     assert "Starting job: job-beta (phase: sync)" not in content
 
 
+def test_scheduler_phase_failure_skips_remaining_phases_of_same_job_only(tmp_path):
+    """Verify that when stop_on_failure is False, a phase failure skips remaining phases of the failed job while still executing subsequent jobs."""
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+
+    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+    py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
+
+    jobs = [
+        Job(
+            name="job-alpha",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_fail],
+                "build": [f"{py_cmd} alpha-build"],
+            }
+        ),
+        Job(
+            name="job-beta",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [f"{py_cmd} beta-sync"],
+                "build": [f"{py_cmd} beta-build"],
+            }
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    success = Scheduler.run(config, mode="phased")
+    assert success is False
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    session_log = log_dir / f"{date_str}_session.log"
+    content = session_log.read_text(encoding="utf-8")
+
+    assert "job-alpha            ->  FAILED" in content
+    assert "job-beta             ->  SUCCESS" in content
+    assert "Starting job: job-alpha (phase: build)" not in content
+    assert "Starting job: job-beta (phase: sync)" in content
+    assert "Starting job: job-beta (phase: build)" in content
+
+
