@@ -370,14 +370,14 @@ def test_cli_run_shutdown_failure(mock_sub_run, tmp_path, capsys):
     # Check that error was printed to stderr
     assert "Failed to initiate system shutdown (exit code 1): Permission denied" in captured.err
     # Verify that the warning message about scheduled shutdown was NOT printed
-    assert "System shutdown scheduled" not in captured.out
+    assert "System will shut down" not in captured.out
 
 
 @patch("lbs.cli.subprocess.run")
-def test_cli_run_shutdown_skipped_when_job_fails(mock_sub_run, tmp_path,
-                                                 capsys):
-    """--shutdown must not power off the machine when a job fails, so the
-    failure stays diagnosable."""
+def test_cli_run_shutdown_triggers_when_job_fails(mock_sub_run, tmp_path,
+                                                  capsys):
+    """--shutdown must still power off the machine after all enabled jobs
+    have been attempted, even if one or more jobs failed."""
     from lbs.cli import cmd_run
     import argparse
     from unittest.mock import patch as local_patch
@@ -391,7 +391,10 @@ def test_cli_run_shutdown_skipped_when_job_fails(mock_sub_run, tmp_path,
     settings:
       log_dir: "{log_dir.as_posix()}"
     jobs:
-      - name: job-1
+      - name: job-pass
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+      - name: job-fail
         cwd: "{workspace_dir.as_posix()}"
         commands: ["exit 1"]
     """
@@ -413,9 +416,155 @@ def test_cli_run_shutdown_skipped_when_job_fails(mock_sub_run, tmp_path,
         assert mock_exit.call_count == 1
         assert mock_exit.call_args[0][0] == 1
 
+    assert mock_sub_run.call_count == 1
+    call_args = mock_sub_run.call_args[0][0]
+    assert call_args[0] == "shutdown"
+    captured = capsys.readouterr()
+    assert "(1 passed, 1 failed)" in captured.out
+    assert "Press Ctrl+C now to cancel the shutdown" in captured.out
+
+
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_triggers_when_stop_on_failure_aborts_queue(
+        mock_sub_run, tmp_path, capsys):
+    """--shutdown must still power off the machine when stop_on_failure: true
+    aborts remaining jobs after a failure."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "failing_abort.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+      stop_on_failure: true
+    jobs:
+      - name: job-fail
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["exit 1"]
+      - name: job-aborted
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 2"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=False,
+        job=None,
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_count == 1
+        assert mock_exit.call_args[0][0] == 1
+
+    assert mock_sub_run.call_count == 1
+    call_args = mock_sub_run.call_args[0][0]
+    assert call_args[0] == "shutdown"
+    captured = capsys.readouterr()
+    assert "(0 passed, 1 failed)" in captured.out
+
+
+@patch("lbs.cli.time.sleep")
+@patch("lbs.cli.subprocess.run")
+def test_cli_trigger_os_shutdown_interactive_countdown_and_ctrl_c_cancel(
+        mock_sub_run, mock_sleep, capsys):
+    """Verify the 60s interactive countdown and that pressing Ctrl+C cancels the OS shutdown."""
+    from lbs.cli import trigger_os_shutdown
+
+    # 1. Full 3-second countdown completes without interruption
+    trigger_os_shutdown(
+        passed_count=2,
+        failed_count=1,
+        interactive=True,
+        countdown_seconds=3,
+    )
+    assert mock_sub_run.call_count == 1
+    assert mock_sleep.call_count == 3
+    out1 = capsys.readouterr().out
+    assert "[WARNING] System will shut down in" in out1
+    assert "(2 passed, 1 failed)" in out1
+    assert "Countdown: 3s remaining..." in out1
+    assert "Countdown: 0s remaining. Shutting down..." in out1
+
+    # 2. Pressing Ctrl+C during countdown invokes shutdown /a (or shutdown -c)
+    mock_sub_run.reset_mock()
+    mock_sleep.reset_mock()
+    mock_sleep.side_effect = KeyboardInterrupt
+
+    trigger_os_shutdown(
+        passed_count=1,
+        failed_count=1,
+        interactive=True,
+        countdown_seconds=60,
+    )
+    assert mock_sub_run.call_count == 2
+    schedule_call = mock_sub_run.call_args_list[0][0][0]
+    cancel_call = mock_sub_run.call_args_list[1][0][0]
+    assert schedule_call[0] == "shutdown"
+    assert cancel_call[0] == "shutdown"
+    if sys.platform == "win32":
+        assert "/a" in cancel_call
+    else:
+        assert "-c" in cancel_call
+    out2 = capsys.readouterr().out
+    assert "[LBS] System shutdown cancelled by user (Ctrl+C)." in out2
+
+
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_skipped_when_phase_filtered(
+        mock_sub_run, tmp_path, capsys):
+    """A phase-filtered run (-p sync) that leaves the build phase PENDING must not power off."""
+    from lbs.cli import cmd_run
+    import argparse
+    from unittest.mock import patch as local_patch
+
+    config_file = tmp_path / "phased.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: build-a
+        cwd: "{workspace_dir.as_posix()}"
+        phases:
+          sync: ["echo sync"]
+          build: ["echo build"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=False,
+        job=None,
+        phase=["sync"],
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_args[0][0] == 0
+
     assert mock_sub_run.call_count == 0
     captured = capsys.readouterr()
-    assert "skipping the requested system shutdown" in captured.err
+    assert "System shutdown cancelled: 1 job in the configuration remains unexecuted or skipped." in captured.err
 
 
 @patch("lbs.cli.subprocess.run")

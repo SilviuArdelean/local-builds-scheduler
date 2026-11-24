@@ -2026,6 +2026,7 @@ def _filter_phase_commands_to_run(
     job_phase_results: dict,
     aborted: bool,
     resume: str | None,
+    job_failed: dict | None = None,
 ) -> list[CommandTask] | None:
     """Evaluates task eligibility for execution, reconciling aborted/completed states.
     Returns the list of CommandTasks to run, or None if the phase should be skipped.
@@ -2043,6 +2044,9 @@ def _filter_phase_commands_to_run(
     if aborted:
         if job_summaries[job.name]["status"] == "PENDING":
             _mark_job_not_run(job_summaries[job.name], job_command_tasks[job.name])
+        return None
+
+    if job_failed and job_failed.get(job.name):
         return None
 
     phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
@@ -2365,6 +2369,7 @@ class Scheduler:
                         job_phase_results=job_phase_results,
                         aborted=aborted,
                         resume=resume,
+                        job_failed=job_failed,
                     )
                     if cmds_to_run_tasks is None:
                         continue
@@ -2414,6 +2419,7 @@ class Scheduler:
                     active_job_start_time = None
                     is_last_phase = (
                         should_abort
+                        or not p_success
                         or not any(j.name == job.name for j, p in execution_tasks[task_idx + 1:])
                     )
                     progress_reporter.end_phase(

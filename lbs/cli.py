@@ -14,27 +14,61 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 from lbs import __version__, Scheduler, clean_session_state
 from lbs.config import load_config, resolve_status_path, Config, ConfigError
 from lbs.utils.lock import FileLock, LockError
 
 
-def trigger_os_shutdown() -> None:
+def _cancel_os_shutdown(abort_cmd: list[str]) -> None:
+    """Cancels a previously scheduled OS shutdown."""
+    try:
+        subprocess.run(abort_cmd, check=True, capture_output=True, text=True)
+        print("[LBS] System shutdown cancelled by user (Ctrl+C).")
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.strip() if e.stderr else str(e)
+        print(
+            f"Failed to cancel system shutdown (exit code {e.returncode}): {err_msg}",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(f"Failed to cancel system shutdown: {e}", file=sys.stderr)
+
+
+def trigger_os_shutdown(
+    passed_count: int | None = None,
+    failed_count: int | None = None,
+    interactive: bool | None = None,
+    countdown_seconds: int = 60,
+) -> None:
     """
-    Schedules an OS shutdown.
+    Schedules an OS shutdown with a 1-minute (60-second) warning and optional live
+    Ctrl+C terminal countdown.
     On Windows: calls shutdown /s /t 60 (60 second delay, abort via shutdown /a).
     On POSIX (Linux/macOS): calls shutdown -h +1 (1 minute delay, abort via shutdown -c).
     """
     try:
+        stats_suffix = (
+            f" ({passed_count} passed, {failed_count} failed)"
+            if passed_count is not None and failed_count is not None
+            else ""
+        )
         if sys.platform == "win32":
             cmd = ["shutdown", "/s", "/t", "60"]
-            warning_msg = "\n[WARNING] System shutdown scheduled in 60 seconds."
-            abort_msg = "To abort the shutdown, run: shutdown /a"
+            abort_cmd = ["shutdown", "/a"]
+            abort_cmd_str = "shutdown /a"
+            warning_msg = f"\n[WARNING] System will shut down in 60 seconds{stats_suffix}."
         else:
             cmd = ["shutdown", "-h", "+1"]
-            warning_msg = "\n[WARNING] System shutdown scheduled in 1 minute."
-            abort_msg = "To abort the shutdown, run: shutdown -c"
+            abort_cmd = ["shutdown", "-c"]
+            abort_cmd_str = "shutdown -c"
+            warning_msg = f"\n[WARNING] System will shut down in 1 minute{stats_suffix}."
+
+        abort_msg = (
+            f"Press Ctrl+C now to cancel the shutdown "
+            f"(or run '{abort_cmd_str}' in another terminal)..."
+        )
 
         # Run the command first. If check=True raises CalledProcessError,
         # we do not output the success/warning messages.
@@ -47,13 +81,42 @@ def trigger_os_shutdown() -> None:
             f"Failed to initiate system shutdown (exit code {e.returncode}): {err_msg}",
             file=sys.stderr,
         )
+        return
     except Exception as e:
         print(f"Failed to initiate system shutdown: {e}", file=sys.stderr)
+        return
+
+    is_interactive = (
+        interactive
+        if interactive is not None
+        else getattr(sys.stdout, "isatty", lambda: False)()
+    )
+    if is_interactive and countdown_seconds > 0:
+        try:
+            for remaining in range(countdown_seconds, 0, -1):
+                sys.stdout.write(f"\rCountdown: {remaining}s remaining...   ")
+                sys.stdout.flush()
+                time.sleep(1)
+            sys.stdout.write("\rCountdown: 0s remaining. Shutting down...\n")
+            sys.stdout.flush()
+        except KeyboardInterrupt:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            _cancel_os_shutdown(abort_cmd)
 
 
-def _count_unfinished_enabled_jobs(config: Config, config_path: str) -> int | None:
-    """Counts enabled jobs whose persisted status is not SUCCESS.
+def _get_enabled_jobs_completion_counts(
+    config: Config,
+    config_path: str,
+    allow_aborted_on_failure: bool = True,
+) -> tuple[int, int, int] | None:
+    """Returns (passed_count, failed_count, unfinished_count) for all enabled jobs.
 
+    An enabled job is considered finished (attempted) if its persisted status is
+    SUCCESS (with no remaining PENDING commands from phase filtering) or FAILED.
+    When stop_on_failure is enabled and allow_aborted_on_failure is True, jobs
+    marked ABORTED or PARTIAL due to an earlier job's failure in the queue are
+    not counted as unexecuted filter omissions.
     Returns None if the status file cannot be read, so callers can stay safe.
     """
     status_path = resolve_status_path(config.settings.log_dir, config_path)
@@ -63,19 +126,70 @@ def _count_unfinished_enabled_jobs(config: Config, config_path: str) -> int | No
     except (OSError, ValueError, AttributeError):
         return None
 
+    passed = 0
+    failed = 0
+    aborted_by_failure = 0
     unfinished = 0
     for job in config.jobs:
         if not job.build_it:
             continue
         info = saved_jobs.get(job.name)
-        if not isinstance(info, dict) or info.get("status") != "SUCCESS":
+        if not isinstance(info, dict):
             unfinished += 1
-    return unfinished
+            continue
+        status = info.get("status")
+        cmds = info.get("commands", [])
+        has_pending_cmds = (
+            status == "SUCCESS"
+            and isinstance(cmds, list)
+            and any(isinstance(c, dict) and c.get("status") == "PENDING" for c in cmds)
+        )
+        if status == "SUCCESS" and not has_pending_cmds:
+            passed += 1
+        elif status == "FAILED":
+            failed += 1
+        elif status in ("ABORTED", "PARTIAL"):
+            aborted_by_failure += 1
+        else:
+            unfinished += 1
+
+    if aborted_by_failure > 0:
+        if not (allow_aborted_on_failure and config.settings.stop_on_failure and failed > 0):
+            unfinished += aborted_by_failure
+
+    return passed, failed, unfinished
 
 
-def _should_trigger_shutdown(config: Config, config_path: str) -> bool:
-    """Returns True only if all enabled jobs completed; otherwise warns on stderr."""
-    unfinished = _count_unfinished_enabled_jobs(config, config_path)
+def _count_unfinished_enabled_jobs(
+    config: Config,
+    config_path: str,
+    allow_aborted_on_failure: bool = True,
+) -> int | None:
+    """Counts enabled jobs that remain unexecuted or skipped.
+
+    Returns None if the status file cannot be read, so callers can stay safe.
+    """
+    counts = _get_enabled_jobs_completion_counts(
+        config,
+        config_path,
+        allow_aborted_on_failure=allow_aborted_on_failure,
+    )
+    if counts is None:
+        return None
+    return counts[2]
+
+
+def _should_trigger_shutdown(
+    config: Config,
+    config_path: str,
+    allow_aborted_on_failure: bool = True,
+) -> bool:
+    """Returns True only if all enabled jobs were attempted (or halted by stop_on_failure); otherwise warns on stderr."""
+    unfinished = _count_unfinished_enabled_jobs(
+        config,
+        config_path,
+        allow_aborted_on_failure=allow_aborted_on_failure,
+    )
     if unfinished is None:
         print(
             "[WARNING] System shutdown cancelled: could not verify the "
@@ -123,16 +237,22 @@ def cmd_run(args: argparse.Namespace) -> None:
             fresh=getattr(args, "fresh", False),
         )
         if getattr(args, "shutdown", False):
+            has_filter = bool(getattr(args, "job", None) or getattr(args, "phase", None))
             if getattr(args, "dry_run", False):
                 print("Dry run: skipping the requested system shutdown.")
-            elif not success:
-                print(
-                    "Session failed: skipping the requested system shutdown so "
-                    "the machine stays available for diagnosis.",
-                    file=sys.stderr,
+            elif _should_trigger_shutdown(
+                config,
+                args.config,
+                allow_aborted_on_failure=not has_filter,
+            ):
+                counts = _get_enabled_jobs_completion_counts(
+                    config,
+                    args.config,
+                    allow_aborted_on_failure=not has_filter,
                 )
-            elif _should_trigger_shutdown(config, args.config):
-                trigger_os_shutdown()
+                passed_cnt = counts[0] if counts else None
+                failed_cnt = counts[1] if counts else None
+                trigger_os_shutdown(passed_count=passed_cnt, failed_count=failed_cnt)
         sys.exit(0 if success else 1)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -261,9 +381,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--shutdown",
         action="store_true",
-        help="Shut down the system after all jobs complete successfully. "
-        "Skipped if any job fails, if any enabled job in the config remains "
-        "unexecuted or skipped (e.g. with -j), and on --dry-run.",
+        help="Shut down the system (with a 60-second warning countdown) after the "
+        "session finishes (including on job failure or stop_on_failure abort). "
+        "Skipped if any enabled job in the config remains unexecuted or skipped "
+        "(e.g. with -j or -p), on Ctrl+C interruption, and on --dry-run.",
     )
     run_parser.add_argument(
         "-q",
