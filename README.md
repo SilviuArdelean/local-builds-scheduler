@@ -15,8 +15,7 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 ## Key Features
 
 - **Sequential Execution**: Runs jobs one at a time to prevent CPU, disk, and build-cache contention.
-- **Job-level Isolation**: Each job runs in its specified working directory (`cwd`) with customizable environment variables.
-- **Robust Error Handling**: Configure whether to stop execution on job failure or continue running subsequent jobs in the queue.
+- **Job-level Isolation**: Each job runs in its specified working directory (`cwd`) with customizable environment variables; a failure in one job skips only the remaining steps/phases of that job while subsequent jobs still execute.
 - **Timeout and Retry Controls**: Set custom command timeouts and retry attempts with configurable delays at the individual job level.
 - **Detailed Session & Job Logging**: Generates high-level session summaries as well as separate, real-time command output logs for every job.
 - **Notification Integration**: Dispatches rich notifications via Slack/Discord webhooks, SMTP emails, or native desktop alerts (balloon tips on Windows).
@@ -69,7 +68,6 @@ LBS uses YAML for configuration. The main configuration defines global settings 
 
 ```yaml
 settings:
-  stop_on_failure: false        # Continue with subsequent jobs even if one fails
   log_dir: "./logs"             # Directory to store log files
   verbose: true                 # Stream command stdout/stderr to CLI console in addition to log files
   notifications:
@@ -107,7 +105,6 @@ jobs:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `log_dir` | `string` | `"logs"` | Directory path where session and job logs are written. Can be absolute or relative. |
-| `stop_on_failure` | `boolean` | `false` | If `true`, aborts the remaining jobs in the queue immediately if any job fails. |
 | `verbose` | `boolean` | `true` | If `true` (default), mirrors command outputs directly to standard output in real-time. Can be silenced with `-q` / `--quiet`. |
 | `notifications` | `object` | *(Optional)* | Configuration for sending status notifications. (See details below). |
 
@@ -166,8 +163,8 @@ The global entry point is `lbs`. It provides several subcommands.
 | **Clean Session State** | `lbs clean config.yaml` | Deletes the profile-scoped status file (`lbs_status_<config>.json`) and temporary session files. |
 | **Run with Notifications** | `lbs run config.yaml --notifications` | Enables status notifications to webhooks/desktop alerts defined in the configuration. |
 | **Run with Secret Credentials** | `lbs run config.yaml -n private.yaml --notifications` | Merges settings from `private.yaml` (typically credentials) with `config.yaml` and executes with notifications enabled. |
-| **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs, then schedules an OS shutdown **only if every job succeeded**. A failed session leaves the machine powered on for diagnosis. |
-| **Overnight Resumed Run** | `lbs run config.yaml --resume latest --notifications` | Resumes a previous run and dispatches alerts on outcome. Append `--shutdown` to power the machine off on success. |
+| **Run and Auto-Shutdown** | `lbs run config.yaml --shutdown` | Executes all jobs, then schedules an OS shutdown (with a 60-second interactive `Ctrl+C` countdown) once all enabled jobs have been attempted (succeeded or failed). |
+| **Overnight Resumed Run** | `lbs run config.yaml --resume latest --notifications` | Resumes a previous run and dispatches alerts on outcome. Append `--shutdown` to power the machine off once all jobs finish. |
 | **List Jobs** | `lbs list config.yaml` | Prints the names of all jobs in the order they will be executed, one per line. |
 | **Validate Configuration** | `lbs validate config.yaml` | Validates YAML syntax and config schema. Exit code `0` if valid, `2` if invalid. |
 | **Validate Merged Configuration** | `lbs validate config.yaml -n private.yaml` | Validates syntax and merged schema of both the main configuration and private notification config together. |
@@ -196,7 +193,7 @@ lbs run <config-path> [options]
 * `--fresh`, `--ignore-saved-state` — Discard any existing saved session state (`lbs_status_<config>.json`) and temporary session files, executing all jobs from the beginning. Mutually exclusive with `--resume`.
 * `-n <path>`, `--notifications-config <path>` — Path to a separate YAML file containing private notification settings (e.g., SMTP credentials, Slack/Discord webhooks) to merge with the main config.
 * `--notifications` — Explicitly enable sending dispatches for desktop, webhook, and email notifications for this execution run.
-* `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all jobs in the session complete (60-second delay; abort via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). The shutdown is only scheduled when the session **succeeds**: if any job fails the machine is deliberately left running so the failure can be diagnosed, and a message explaining the skip is written to stderr. It is also skipped under `--dry-run`, which executes no jobs.
+* `--shutdown` — *Optional, off by default.* Schedules an OS shutdown after all enabled jobs in the session have been attempted, whether they succeeded or failed (60-second delay with an interactive `Ctrl+C` countdown in the terminal; can also be aborted via `shutdown /a` on Windows or `shutdown -c` on Linux/macOS). It is skipped under `--dry-run`, on `Ctrl+C` during the build, or if any enabled job in the configuration remains unexecuted or skipped (e.g. when filtering with `-j` or `-p`).
 
 #### `status`
 Inspect saved session status for a configuration without executing.
@@ -322,9 +319,9 @@ lbs list config.yaml                            # reminder of job names
 
 ```bash
 lbs run config.yaml -q                           # quiet mode: compact progress bar, full logs still on disk
-lbs run config.yaml --resume latest --shutdown   # power off automatically, only if the resumed session succeeds
+lbs run config.yaml --resume latest --shutdown   # power off automatically after all enabled jobs have been attempted
 ```
-`--shutdown` is skipped on failure, on `--dry-run`, and if any enabled job was filtered out — so it won't power off mid-recovery by accident.
+`--shutdown` gives a 60-second warning countdown (abortable with `Ctrl+C`) after all enabled jobs have been tried (succeeded or failed), and is skipped on `--dry-run`, on `Ctrl+C` during the build, and if any enabled job was filtered out with `-j` or `-p`.
 
 ### 7. "Another instance is already running"
 

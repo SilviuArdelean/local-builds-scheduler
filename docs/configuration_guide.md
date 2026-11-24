@@ -85,7 +85,7 @@ The configuration pipeline transforms raw YAML text into typed, validated Python
 +-----------------------------------------------------------------------+
 | 4. TYPED INSTANTIATION (load_config)                                  |
 |    Config                                                             |
-|      ├── Settings (stop_on_failure, log_dir, verbose, quiet, Notifs)  |
+|      ├── Settings (log_dir, verbose, quiet, NotificationsConfig)      |
 |      └── list[Job] (name, cwd, build_it, phases, env, retries, etc.)  |
 +-----------------------------------------------------------------------+
                                    |
@@ -100,7 +100,7 @@ The configuration pipeline transforms raw YAML text into typed, validated Python
 
 Key dataclass models defined in [`lbs.config`](../lbs/config.py):
 * `Config`: Top-level configuration container holding `settings` and `jobs`.
-* `Settings`: Global execution policies (`stop_on_failure`, `log_dir`, `verbose`, `quiet`, `notifications`).
+* `Settings`: Global execution policies (`log_dir`, `verbose`, `quiet`, `notifications`).
 * `NotificationsConfig` & `EmailConfig`: Dispatch endpoints (webhooks, email SMTP, desktop alerts).
 * `Job`: Execution unit defining target `cwd`, `build_it` activation toggle, `commands` or `phases`, environment overlays, retry counts, and execution timeouts.
 
@@ -140,7 +140,6 @@ The `settings` block configures scheduler-wide operational parameters. All field
 ```yaml
 settings:
   log_dir: "./logs"             # Default: "logs"
-  stop_on_failure: true         # Default: false
   quiet: false                  # Default: false (live output is streamed to console by default)
   notifications:                # Default: empty (disabled)
     on_success: true
@@ -151,7 +150,6 @@ settings:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `log_dir` | `string` | `"logs"` | Directory path where session summaries, state files (`lbs_state.json`), concurrency locks (`lbs.lock`), and job log files are written. Relative paths are resolved relative to the current working directory from which `lbs` is invoked. The directory is created automatically if it does not exist. |
-| `stop_on_failure` | `boolean` | `false` | When `true`, any job or phase failure halts the scheduler immediately, marking unexecuted jobs as `ABORTED` (or `PARTIAL` if earlier phases completed). When `false`, LBS logs the failure and continues executing subsequent jobs. |
 | `quiet` | `boolean` | `false` | When `true`, suppresses live streaming of command output to the terminal (silent mode) while continuing to capture full logs in the job log files and printing the final summary table. Can also be enabled via CLI flag `-q` / `--quiet`. |
 | `verbose` | `boolean` | `true` | (*Legacy / Alternate*) Live output streaming is enabled by default (`true`). Setting `verbose: false` is equivalent to `quiet: true`. If `quiet: true` is set, it takes precedence. |
 | `notifications` | `object` | `None` | Notification triggers and endpoint configurations. |
@@ -736,7 +734,6 @@ Save as `minimal-build.yaml`:
 # LBS Minimal Configuration Template
 settings:
   log_dir: "./logs"
-  stop_on_failure: true
   verbose: true
 
 jobs:
@@ -769,7 +766,6 @@ Save as `configs/clean-chromium-production.yaml`:
 
 settings:
   log_dir: "./logs"
-  stop_on_failure: true
   verbose: true
   notifications:
     on_success: true

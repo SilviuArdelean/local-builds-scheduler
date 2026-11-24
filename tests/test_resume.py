@@ -23,7 +23,7 @@ from lbs.runner import (
 def test_resume_no_state_error(tmp_path):
     """Verify that attempting to resume when no state exists raises a ValueError."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     jobs = [Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])]
     config = Config(settings=settings, jobs=jobs)
@@ -36,7 +36,7 @@ def test_resume_no_state_error(tmp_path):
 def test_resume_completed_run(tmp_path, capsys):
     """Verify that attempting to resume a fully successful run exits early with success."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     jobs = [Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])]
     config = Config(settings=settings, jobs=jobs)
@@ -58,7 +58,7 @@ def test_resume_completed_run(tmp_path, capsys):
 def test_resume_failed_run(tmp_path):
     """Verify that resuming a failed session execution only runs non-succeeded jobs."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # We will write to log file to track how many times a command ran
     run_tracker_1 = tmp_path / "run_tracker_1.txt"
@@ -118,7 +118,7 @@ def test_resume_interrupted_run(tmp_path):
     """Verify that we can resume from a manually constructed interrupted state and unify logs/dates."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     run_tracker_1 = tmp_path / "run_tracker_1.txt"
     run_tracker_2 = tmp_path / "run_tracker_2.txt"
@@ -171,7 +171,7 @@ def test_resume_dry_run(tmp_path, capsys):
     """Verify that --dry-run prints ALREADY SUCCEEDED for completed jobs when resuming."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     jobs = [
         Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"]),
@@ -210,7 +210,7 @@ def test_resume_invalid_json_shape(tmp_path):
     """Verify that malformed state file JSON shape raises ValueError."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config = Config(
         settings=settings,
         jobs=[Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])])
@@ -242,7 +242,7 @@ def test_resume_invalid_session_date(tmp_path):
     """Verify that invalid or malicious session_date string formats raise ValueError."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config = Config(
         settings=settings,
         jobs=[Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"])])
@@ -280,7 +280,7 @@ def test_resume_invalid_session_date(tmp_path):
 def test_profile_scoped_status_file_creation(tmp_path):
     """Verify that different config files create isolated status files in the log directory."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # Profile 1: build-debug
     config1 = Config(
@@ -459,7 +459,7 @@ def test_stale_running_reconciler_command_level(tmp_path, capsys):
 def test_granular_command_skipping_on_resume(tmp_path):
     """Verify that commands marked DONE are skipped on --resume latest, starting at the failed command."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-granular.yaml"
 
     trace_file = tmp_path / "trace.txt"
@@ -536,7 +536,7 @@ def test_granular_command_skipping_on_resume(tmp_path):
 def test_granular_phased_command_resumption(tmp_path):
     """Verify that in phased mode, completed phases and completed commands are skipped on resume."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-phased.yaml"
 
     trace_file = tmp_path / "phased_trace.txt"
@@ -588,7 +588,7 @@ def test_granular_phased_command_resumption(tmp_path):
 def test_disabled_job_command_tasks_skipped(tmp_path):
     """Verify that disabled jobs (build_it: false) have their commands initialized to SKIPPED."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-disabled.yaml"
 
     job_enabled = Job(
@@ -622,7 +622,7 @@ def test_disabled_job_command_tasks_skipped(tmp_path):
 def test_command_duration_preserved_accurately(tmp_path):
     """Verify that command durations are preserved accurately and not reset to ~0 by post-run drains."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-duration.yaml"
 
     py_sleep_1 = f'"{sys.executable}" -c "import time; time.sleep(0.15)"'
@@ -660,7 +660,7 @@ def test_scheduler_keyboard_interrupt_graceful_handling(tmp_path, capsys):
     """Ticket 1: Verify graceful state capture and messaging when KeyboardInterrupt occurs."""
     from unittest.mock import patch
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/test-interrupt.yaml"
 
     py_pass = f'"{sys.executable}" -c "print(1)"'
@@ -691,11 +691,11 @@ def test_scheduler_keyboard_interrupt_graceful_handling(tmp_path, capsys):
     assert jobs_data["job-2"]["build_status"] == "SKIPPED"
 
 
-def test_status_file_synced_on_stop_on_failure(tmp_path):
-    """Ticket 2: Verify that when stop_on_failure halts run, the status JSON on disk has SKIPPED."""
+def test_status_file_synced_after_job_failure_and_subsequent_jobs(tmp_path):
+    """Verify that when a job fails, subsequent jobs still execute and all statuses are synced to JSON on disk."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
-    config_path = "configs/test-stop-failure.yaml"
+    settings = Settings(log_dir=str(log_dir))
+    config_path = "configs/test-failure-isolation.yaml"
 
     py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
     py_pass = f'"{sys.executable}" -c "print(1)"'
@@ -710,7 +710,7 @@ def test_status_file_synced_on_stop_on_failure(tmp_path):
     success = Scheduler.run(config, config_path=config_path)
     assert success is False
 
-    status_file = log_dir / "lbs_status_test-stop-failure.json"
+    status_file = log_dir / "lbs_status_test-failure-isolation.json"
     assert status_file.is_file()
 
     with open(status_file, "r", encoding="utf-8") as f:
@@ -723,11 +723,11 @@ def test_status_file_synced_on_stop_on_failure(tmp_path):
     assert jobs_data["job-2"]["status"] == "FAILED"
     assert jobs_data["job-2"]["build_status"] == "FAILED"
 
-    assert jobs_data["job-3"]["status"] == "ABORTED"
-    assert jobs_data["job-3"]["build_status"] == "SKIPPED"
+    assert jobs_data["job-3"]["status"] == "SUCCESS"
+    assert jobs_data["job-3"]["build_status"] == "DONE"
     assert len(jobs_data["job-3"]["commands"]) == 2
     for cmd in jobs_data["job-3"]["commands"]:
-        assert cmd["status"] == "SKIPPED"
+        assert cmd["status"] == "DONE"
 
 
 def test_restore_job_command_tasks_identity_matching():
@@ -801,7 +801,7 @@ def test_resume_command_identity_inserted_command_e2e(tmp_path, capsys):
     4. Run resume and verify 'new_setup' executes while 'cmd0' is skipped.
     """
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-inserted.yaml"
     trace_file = tmp_path / "trace_inserted.txt"
 
@@ -887,7 +887,7 @@ def test_resume_command_identity_inserted_command_e2e(tmp_path, capsys):
 def test_resume_command_text_modification_detected(tmp_path, capsys):
     """Verify that editing command text causes the modified command to be treated as PENDING."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
     config_path = "configs/build-mod.yaml"
     trace_file = tmp_path / "trace_mod.txt"
 

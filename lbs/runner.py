@@ -2024,10 +2024,10 @@ def _filter_phase_commands_to_run(
     job_command_tasks: dict[str, list[CommandTask]],
     job_summaries: dict,
     job_phase_results: dict,
-    aborted: bool,
     resume: str | None,
+    job_failed: dict | None = None,
 ) -> list[CommandTask] | None:
-    """Evaluates task eligibility for execution, reconciling aborted/completed states.
+    """Evaluates task eligibility for execution, skipping failed or completed jobs.
     Returns the list of CommandTasks to run, or None if the phase should be skipped.
     """
     is_job_done = (
@@ -2040,9 +2040,7 @@ def _filter_phase_commands_to_run(
     if not job.build_it:
         return None
 
-    if aborted:
-        if job_summaries[job.name]["status"] == "PENDING":
-            _mark_job_not_run(job_summaries[job.name], job_command_tasks[job.name])
+    if job_failed and job_failed.get(job.name):
         return None
 
     phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
@@ -2078,12 +2076,11 @@ def _execute_phase_run(
     verbose_mode: bool,
     log_dir: Path,
     log_to_session,
-    stop_on_failure: bool,
     phases_to_run: set[str],
     progress_reporter: "_QueueProgressReporter | None" = None,
-) -> tuple[bool, bool, float]:
+) -> tuple[bool, float]:
     """Runs a single phase execution attempt and persists state.
-    Returns (success: bool, should_abort: bool, duration: float).
+    Returns (success: bool, duration: float).
     """
     phase_display = f" (phase: {phase_name})" if phase_name != "default" else ""
     log_to_session(f"Starting job: {job.name}{phase_display} (cwd: {job.cwd})")
@@ -2117,15 +2114,11 @@ def _execute_phase_run(
     job_durations[job.name] += p_duration
     job_phase_results[job.name][phase_name] = p_success
 
-    should_abort = False
     if p_success:
         log_to_session(f"Job {job.name}{phase_display}: SUCCESS (took {p_duration:.2f}s)")
     else:
         job_failed[job.name] = True
         log_to_session(f"Job {job.name}{phase_display}: FAILED (took {p_duration:.2f}s)")
-        if stop_on_failure:
-            log_to_session("Aborting execution of subsequent jobs (stop_on_failure is enabled)")
-            should_abort = True
 
     _update_job_phase_status(
         job=job,
@@ -2136,7 +2129,7 @@ def _execute_phase_run(
         job_summaries=job_summaries,
     )
     _save_status(status_path, config_path, session_date, job_summaries, config_hash=current_config_hash)
-    return p_success, should_abort, p_duration
+    return p_success, p_duration
 
 
 class Scheduler:
@@ -2285,7 +2278,6 @@ class Scheduler:
 
             job_failed = {}
             overall_success = True
-            aborted = False
 
             def log_to_session(msg: str) -> None:
                 timestamp = datetime.datetime.now().strftime(
@@ -2305,7 +2297,7 @@ class Scheduler:
                 log_to_session("--- Session started ---")
 
             log_to_session(
-                f"Settings: stop_on_failure={config.settings.stop_on_failure}, log_dir={config.settings.log_dir}"
+                f"Settings: log_dir={config.settings.log_dir}"
             )
 
             # Save initial state if not resuming
@@ -2336,7 +2328,6 @@ class Scheduler:
                     job_command_tasks=job_command_tasks,
                     job_summaries=job_summaries,
                     job_phase_results=job_phase_results,
-                    aborted=False,
                     resume=resume,
                 )
                 if tasks:
@@ -2363,8 +2354,8 @@ class Scheduler:
                         job_command_tasks=job_command_tasks,
                         job_summaries=job_summaries,
                         job_phase_results=job_phase_results,
-                        aborted=aborted,
                         resume=resume,
+                        job_failed=job_failed,
                     )
                     if cmds_to_run_tasks is None:
                         continue
@@ -2390,7 +2381,7 @@ class Scheduler:
 
                     active_job = job
                     active_job_start_time = time.perf_counter()
-                    p_success, should_abort, p_duration = _execute_phase_run(
+                    p_success, p_duration = _execute_phase_run(
                         job=job,
                         phase_name=phase_name,
                         cmds_to_run_tasks=cmds_to_run_tasks,
@@ -2406,14 +2397,13 @@ class Scheduler:
                         verbose_mode=verbose_mode,
                         log_dir=log_dir,
                         log_to_session=log_to_session,
-                        stop_on_failure=config.settings.stop_on_failure,
                         phases_to_run=phases_to_run,
                         progress_reporter=progress_reporter,
                     )
                     active_job = None
                     active_job_start_time = None
                     is_last_phase = (
-                        should_abort
+                        not p_success
                         or not any(j.name == job.name for j, p in execution_tasks[task_idx + 1:])
                     )
                     progress_reporter.end_phase(
@@ -2426,8 +2416,6 @@ class Scheduler:
 
                     if not p_success:
                         overall_success = False
-                    if should_abort:
-                        aborted = True
 
                 # Unconditional save to disk after execution tasks complete
                 _save_status(

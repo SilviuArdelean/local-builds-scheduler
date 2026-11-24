@@ -69,7 +69,6 @@ class NotificationsConfig:
 @dataclass
 class Settings:
     """Global scheduler settings."""
-    stop_on_failure: bool = False
     log_dir: str = "logs"
     verbose: bool = True
     quiet: bool = False
@@ -348,10 +347,6 @@ def _validate_settings(settings_data: dict) -> None:
     if not isinstance(settings_data, dict):
         raise ConfigError("'settings' section must be a dictionary")
 
-    if "stop_on_failure" in settings_data:
-        if not isinstance(settings_data["stop_on_failure"], bool):
-            raise ConfigError("'stop_on_failure' setting must be a boolean")
-
     if "log_dir" in settings_data:
         log_dir = settings_data["log_dir"]
         if not isinstance(log_dir, str) or not log_dir.strip():
@@ -568,7 +563,6 @@ def load_config(
         verbose_val = settings_dict.get("verbose", True)
 
     settings = Settings(
-        stop_on_failure=settings_dict.get("stop_on_failure", False),
         log_dir=settings_dict.get("log_dir", "logs"),
         verbose=verbose_val,
         quiet=quiet_val,

@@ -14,7 +14,7 @@ from lbs.runner import run_scheduler
 def test_runner_command_timeout(tmp_path):
     """Verify that a hanging command is terminated when its timeout is exceeded."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # Run a python command that sleeps for 5 seconds
     py_hang = f'"{sys.executable}" -c "import time; time.sleep(5)"'
@@ -49,7 +49,7 @@ def test_runner_command_timeout(tmp_path):
 def test_runner_command_success_before_timeout(tmp_path):
     """Verify that a command completing within its timeout executes successfully."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_fast = f'"{sys.executable}" -c "print(\'completed fast\')"'
 
@@ -80,7 +80,7 @@ def test_runner_command_timeout_group_termination(tmp_path):
     import time
 
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     pid_file = tmp_path / "child_pid.txt"
     grandchild_path = tmp_path / "grandchild.py"
@@ -134,7 +134,7 @@ def test_runner_command_timeout_group_termination(tmp_path):
 def test_runner_command_false_timeout_prevention(tmp_path):
     """Verify that a command executing close to but under the timeout limit succeeds and drains cleanly."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # Sleep 0.5s and print, with a 1.8s timeout
     py_cmd = f'"{sys.executable}" -c "import time; time.sleep(0.5); print(\'near-boundary-output\')"'

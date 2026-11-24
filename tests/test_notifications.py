@@ -377,21 +377,19 @@ def test_scheduler_run_triggers_notification_on_keyboard_interrupt(mock_urlopen,
 
 
 @patch("urllib.request.urlopen")
-def test_scheduler_run_triggers_notification_on_stop_on_failure_abort(mock_urlopen, tmp_path):
-    """Verify that Scheduler.run dispatches abort breakdown when stop_on_failure halts execution."""
+def test_scheduler_run_triggers_notification_on_failure_with_disabled_job(mock_urlopen, tmp_path):
+    """Verify that Scheduler.run dispatches failure and disabled jobs breakdown."""
     log_dir = tmp_path / "logs"
     settings = Settings(
-        stop_on_failure=True,
         log_dir=str(log_dir),
         notifications=NotificationsConfig(
             on_failure=True,
             slack_webhook="https://hooks.slack.com/services/on-abort",
         ),
     )
-    # job-1 fails, job-2 should be aborted
     jobs = [
         Job(name="job-fail", cwd=str(tmp_path), commands=['python -c "import sys; sys.exit(1)"']),
-        Job(name="job-aborted", cwd=str(tmp_path), commands=["echo hello"]),
+        Job(name="job-disabled", cwd=str(tmp_path), commands=["echo hello"], build_it=False),
     ]
     config = Config(settings=settings, jobs=jobs)
 
@@ -409,7 +407,7 @@ def test_scheduler_run_triggers_notification_on_stop_on_failure_abort(mock_urlop
     assert "Failed Jobs:" in text
     assert "job-fail" in text
     assert "Aborted / Skipped:" in text
-    assert "• job-aborted (aborted)" in text
+    assert "• job-disabled (disabled)" in text
     assert "Resume command:" in text
 
 
@@ -468,7 +466,7 @@ def test_multiphase_job_interruption_duration_accumulates(tmp_path):
             job_durations = kwargs.get("job_durations")
             job_name = kwargs.get("job").name
             job_durations[job_name] += 2.5
-            return True, False, 2.5
+            return True, 2.5
         elif phase_name == "phase-2":
             # Interrupt during phase 2
             time.sleep(0.05)

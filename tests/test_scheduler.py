@@ -18,7 +18,7 @@ from lbs.runner import Scheduler
 def test_scheduler_queue_order(tmp_path):
     """Verify that multiple jobs run in the exact sequential order defined by the config."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # We will write to a shared tracking file to prove exact execution order
     tracker_file = tmp_path / "order_tracker.txt"
@@ -45,7 +45,7 @@ def test_scheduler_queue_order(tmp_path):
 def test_scheduler_filtering_success(tmp_path):
     """Verify that only the jobs matching the job_filter are executed, leaving others SKIPPED."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     tracker_file = tmp_path / "filter_tracker.txt"
     py_cmd_A = f'"{sys.executable}" -c "with open(r\'{tracker_file}\', \'a\') as f: f.write(\'A\\n\')"'
@@ -84,7 +84,7 @@ def test_scheduler_filtering_success(tmp_path):
 def test_scheduler_filtering_invalid_name(tmp_path):
     """Verify that passing non-existent job name filters raises a ValueError."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     jobs = [
         Job(name="job-A", cwd=str(tmp_path), commands=["echo A"]),
@@ -202,7 +202,7 @@ def test_cli_run_value_error_without_job(tmp_path):
 def test_scheduler_phased_execution(tmp_path):
     """Verify that multi-phase jobs run in phase-by-phase order across active jobs in phased mode."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
 
@@ -245,7 +245,7 @@ def test_scheduler_phased_execution(tmp_path):
 def test_scheduler_phase_filtering(tmp_path):
     """Verify targeted phase execution using phase_filter."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
 
@@ -286,7 +286,7 @@ def test_scheduler_phase_filtering(tmp_path):
 def test_scheduler_sequential_execution(tmp_path):
     """Verify that multi-phase jobs run all phases of job-alpha before starting job-beta in sequential mode."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
 
@@ -326,10 +326,10 @@ def test_scheduler_sequential_execution(tmp_path):
     assert idx_alpha_sync < idx_alpha_build < idx_beta_sync < idx_beta_build
 
 
-def test_scheduler_sequential_mode_failure_stop_on_failure(tmp_path):
-    """Verify that a failure in sequential mode aborts remaining phases and subsequent jobs when stop_on_failure is enabled."""
+def test_scheduler_phase_failure_skips_remaining_phases_of_same_job_only(tmp_path):
+    """Verify that a phase failure skips remaining phases of the failed job while still executing subsequent jobs."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
     py_cmd = f'"{sys.executable}" -c "import sys; print(sys.argv[1])"'
@@ -362,8 +362,9 @@ def test_scheduler_sequential_mode_failure_stop_on_failure(tmp_path):
     content = session_log.read_text(encoding="utf-8")
 
     assert "job-alpha            ->  FAILED" in content
-    assert "job-beta             ->  ABORTED" in content
+    assert "job-beta             ->  SUCCESS" in content
     assert "Starting job: job-alpha (phase: build)" not in content
-    assert "Starting job: job-beta (phase: sync)" not in content
+    assert "Starting job: job-beta (phase: sync)" in content
+    assert "Starting job: job-beta (phase: build)" in content
 
 

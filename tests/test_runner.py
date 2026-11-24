@@ -21,7 +21,7 @@ from lbs.runner import (
 def test_runner_success(tmp_path):
     """Verify that a successful run creates logs and correct summaries."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # We will use sys.executable to run a python command cross-platform
     py_cmd = f'"{sys.executable}" -c "print(\'hello from stdout\')"'
@@ -68,9 +68,9 @@ def test_runner_success(tmp_path):
 
 
 def test_runner_failure_non_stop(tmp_path):
-    """Verify failure isolation when stop_on_failure is False."""
+    """Verify failure isolation across jobs."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # job 1 has command 1 succeed, command 2 fail, command 3 not executed
     py_success = f'"{sys.executable}" -c "print(\'first command\')"'
@@ -103,7 +103,7 @@ def test_runner_failure_non_stop(tmp_path):
     assert "Command failed with exit code 42" in job_one_content
     assert "third command not run" not in job_one_content
 
-    # Check job-two log: it did run because stop_on_failure is False
+    # Check job-two log: it did run despite job-one failing
     assert job_two_log.exists()
     job_two_content = job_two_log.read_text(encoding="utf-8")
     assert "job two executed" in job_two_content
@@ -121,17 +121,31 @@ def test_runner_failure_non_stop(tmp_path):
     assert "Skipped: 0" in session_content
 
 
-def test_runner_stop_on_failure(tmp_path):
-    """Verify immediate abort on job failure when stop_on_failure is True."""
+def test_runner_phased_job_failure_skips_own_subsequent_phases_only(tmp_path):
+    """Verify that when a job fails in an early phase, its remaining phases are skipped while other jobs still execute."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
-    py_job2 = f'"{sys.executable}" -c "print(\'job two executed\')"'
+    py_ok = f'"{sys.executable}" -c "print(\'executed\')"'
 
     jobs = [
-        Job(name="job-one", cwd=str(tmp_path), commands=[py_fail]),
-        Job(name="job-two", cwd=str(tmp_path), commands=[py_job2])
+        Job(
+            name="job-one",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_fail],
+                "build": [py_ok],
+            },
+        ),
+        Job(
+            name="job-two",
+            cwd=str(tmp_path),
+            phases={
+                "sync": [py_ok],
+                "build": [py_ok],
+            },
+        ),
     ]
     config = Config(settings=settings, jobs=jobs)
 
@@ -140,27 +154,27 @@ def test_runner_stop_on_failure(tmp_path):
 
     date_str = datetime.datetime.now().strftime("%Y-%m-%d")
     session_log = log_dir / f"{date_str}_session.log"
-    job_two_log = log_dir / f"{date_str}_job-two.log"
+    job_one_build_log = log_dir / f"{date_str}_job-one_build.log"
+    job_two_build_log = log_dir / f"{date_str}_job-two_build.log"
 
-    # Job two should not even have a log file created because it was aborted/skipped
-    assert not job_two_log.exists()
+    # job-one's build phase should not have run because job-one failed in sync
+    assert not job_one_build_log.exists()
+    # job-two's build phase should have run and succeeded
+    assert job_two_build_log.exists()
 
-    # Check session log
     session_content = session_log.read_text(encoding="utf-8")
-    assert "Aborting execution of subsequent jobs (stop_on_failure is enabled)" in session_content
-    assert "job-one              ->  FAILED" in session_content
-    assert "job-two              ->  ABORTED    (never started)" in session_content
+    assert "job-one              ->  FAILED     (phase 'sync')" in session_content
+    assert "job-two              ->  SUCCESS" in session_content
     assert "Session completed: FAILED" in session_content
-    assert "Run Summary" in session_content
-    assert "Passed: 0" in session_content
+    assert "Passed: 1" in session_content
     assert "Failed: 1" in session_content
-    assert "Skipped: 1" in session_content
+    assert "Skipped: 0" in session_content
 
 
 def test_runner_environment_propagation(tmp_path):
     """Verify that child processes inherit custom environment overlays."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # Command prints environment variables to stdout
     py_cmd = f'"{sys.executable}" -c "import os; print(\'LBS_VAL_ONE:\' + os.environ.get(\'LBS_TEST_ONE\', \'\')); print(\'LBS_VAL_TWO:\' + os.environ.get(\'LBS_TEST_TWO\', \'\'))"'
@@ -196,7 +210,7 @@ def test_runner_environment_propagation(tmp_path):
 def test_runner_retry_success(tmp_path):
     """Verify that a job failing on first attempt but succeeding on retry is reported as SUCCESS."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     # Creates a flag file. Succeeds only if flag file already exists.
     flag_file = tmp_path / "flag.txt"
@@ -236,7 +250,7 @@ def test_runner_retry_exhausted(tmp_path):
     """Verify that retries are exhausted, delay is respected, and failure is reported."""
     from unittest.mock import patch
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
 
@@ -275,7 +289,7 @@ def test_runner_retry_exhausted(tmp_path):
 def test_runner_skips_disabled_jobs(tmp_path):
     """Verify that disabled jobs are correctly skipped, marked as SKIPPED, and logs are not created for them."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_cmd1 = f'"{sys.executable}" -c "print(\'job-one\')"'
     py_cmd2 = f'"{sys.executable}" -c "print(\'job-two\')"'
@@ -332,7 +346,7 @@ def test_runner_skips_disabled_jobs(tmp_path):
 def test_runner_directory_persistence(tmp_path):
     """Verify that working directory changes persist across sequential commands."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     if sys.platform == "win32":
         commands = [
@@ -369,7 +383,7 @@ def test_runner_directory_persistence(tmp_path):
 def test_runner_environment_persistence(tmp_path):
     """Verify that environment variable assignments persist across sequential commands."""
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     if sys.platform == "win32":
         commands = [
@@ -547,14 +561,18 @@ def test_summary_distinguishes_job_lifecycle_states():
     assert (passed, failed, skipped) == (0, 1, 3)
 
 
-def test_runner_partial_job_when_other_job_aborts_run(tmp_path):
-    """Ticket 5: a job that finished its first phase is PARTIAL, not SKIPPED,
-    when another job's failure aborts the rest of the run."""
+def test_runner_partial_job_when_interrupted(tmp_path):
+    """Ticket 5: a job that finished its first phase is PARTIAL, not ABORTED,
+    when a subsequent job is interrupted by Ctrl+C."""
+    import json
+    import pytest
+    from unittest.mock import patch
+    from lbs.runner import _run_single_job as real_run_single_job
+
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir))
+    settings = Settings(log_dir=str(log_dir))
 
     py_ok = f'"{sys.executable}" -c "print(1)"'
-    py_fail = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
 
     jobs = [
         Job(name="job-a",
@@ -566,18 +584,24 @@ def test_runner_partial_job_when_other_job_aborts_run(tmp_path):
         Job(name="job-b",
             cwd=str(tmp_path),
             phases={
-                "sync": [py_fail],
+                "sync": [py_ok],
                 "build": [py_ok]
             }),
     ]
     config = Config(settings=settings, jobs=jobs)
 
-    assert run_scheduler(config) is False
+    def side_effect_interrupt(*args, **kwargs):
+        if kwargs.get("job").name == "job-b":
+            raise KeyboardInterrupt
+        return real_run_single_job(*args, **kwargs)
 
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    content = (log_dir / f"{date_str}_session.log").read_text(encoding="utf-8")
-    assert "job-a                ->  PARTIAL    (1/2 phases complete)" in content
-    assert "job-b                ->  FAILED     (phase 'sync')" in content
+    with patch("lbs.runner._run_single_job", side_effect=side_effect_interrupt):
+        with pytest.raises(KeyboardInterrupt):
+            run_scheduler(config)
+
+    status_data = json.loads((log_dir / "lbs_status.json").read_text(encoding="utf-8"))
+    assert status_data["jobs"]["job-a"]["status"] == "PARTIAL"
+    assert status_data["jobs"]["job-b"]["status"] == "INTERRUPTED"
 
 
 def test_queue_progress_reporter_quiet_bar_rendering():
@@ -783,8 +807,7 @@ def test_scheduler_quiet_and_verbose_progress_integration(tmp_path):
     py_cmd = f'"{sys.executable}" -c "print(\'running\')"'
 
     # 1. Test quiet mode
-    settings_quiet = Settings(stop_on_failure=False,
-                              log_dir=str(log_dir),
+    settings_quiet = Settings(log_dir=str(log_dir),
                               quiet=True)
     jobs = [
         Job(name="job-q1", cwd=str(tmp_path), commands=[py_cmd]),
@@ -794,8 +817,7 @@ def test_scheduler_quiet_and_verbose_progress_integration(tmp_path):
     assert run_scheduler(config_quiet) is True
 
     # 2. Test verbose mode
-    settings_verbose = Settings(stop_on_failure=False,
-                                log_dir=str(log_dir),
+    settings_verbose = Settings(log_dir=str(log_dir),
                                 verbose=True)
     jobs_v = [
         Job(name="job-v1",
@@ -1167,7 +1189,7 @@ def test_split_screen_reproduction_with_clink_and_ansi_job_output(tmp_path, caps
     from lbs.runner import _QueueProgressReporter
 
     log_dir = tmp_path / "logs"
-    settings = Settings(stop_on_failure=True, log_dir=str(log_dir), verbose=True)
+    settings = Settings(log_dir=str(log_dir), verbose=True)
 
     # Script emitting Clink AutoRun backspace sequences, ANSI cursor/scroll manipulation attempts, and bare CR
     clink_script = tmp_path / "clink_sim.py"

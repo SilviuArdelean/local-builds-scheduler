@@ -24,7 +24,6 @@ def test_valid_config_loading(tmp_path):
 
     yaml_content = f"""
     settings:
-      stop_on_failure: true
       log_dir: "custom_logs"
     jobs:
       - name: job-1
@@ -37,7 +36,6 @@ def test_valid_config_loading(tmp_path):
     config_file.write_text(yaml_content, encoding="utf-8")
 
     config = load_config(config_file)
-    assert config.settings.stop_on_failure is True
     assert config.settings.log_dir == "custom_logs"
     assert len(config.jobs) == 1
     assert config.jobs[0].name == "job-1"
@@ -63,7 +61,7 @@ def test_valid_config_defaults(tmp_path):
 
     config = load_config(config_file)
     # Defaults should be applied
-    assert config.settings.stop_on_failure is False
+    assert not hasattr(config.settings, "stop_on_failure")
     assert config.settings.log_dir == "logs"
     assert config.jobs[0].env == {}
 
@@ -98,7 +96,7 @@ def test_empty_config_file(tmp_path):
 def test_missing_jobs_section(tmp_path):
     """Config missing the 'jobs' section should raise ConfigError."""
     config_file = tmp_path / "no_jobs.yaml"
-    config_file.write_text("settings: {stop_on_failure: true}",
+    config_file.write_text("settings: {log_dir: custom_logs}",
                            encoding="utf-8")
 
     with pytest.raises(ConfigError) as exc:

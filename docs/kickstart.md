@@ -96,9 +96,6 @@ settings:
   # Directory where session-level and job-specific logs are written
   log_dir: "./logs"
 
-  # Stop execution of the remaining queue if any build fails
-  stop_on_failure: true
-
   # Stream compiler standard outputs live to your terminal screen
   verbose: true
 
@@ -125,7 +122,6 @@ jobs:
 ### Configuration Fields Breakdown:
 * **`settings`**:
   * `log_dir`: Path to log output. If the directory does not exist, LBS creates it automatically.
-  * `stop_on_failure`: Set to `true` to immediately halt subsequent jobs if one fails. Set to `false` if jobs are independent.
   * `verbose`: Set to `true` to see live compiler outputs on screen in addition to logs.
 * **`jobs`**:
   * `name`: Unique identifier for the job. Used to name log files and track resume state.
