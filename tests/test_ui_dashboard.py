@@ -242,6 +242,12 @@ def test_no_ansi_and_ascii_fallback_are_strictly_plain_ascii():
     assert "* 1" in output
     assert "LIVE COMPILER OUTPUT" in lines[-1]
 
+    # Minimal tier with long command must also stay strictly ASCII-encodable (no Unicode ellipsis)
+    minimal_lines = renderer.render(snap, width=48, height=12, profile=profile)
+    minimal_output = "\n".join(minimal_lines)
+    assert "\x1b" not in minimal_output
+    minimal_output.encode("ascii")
+
 
 def test_render_plain_milestone_contains_expected_fields_without_ansi():
     """Verify non-TTY milestone divider has zero ANSI codes and clean ASCII fallback."""

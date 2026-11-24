@@ -580,7 +580,10 @@ class DashboardRenderer:
         st_color = status_color(snapshot.status)
         queue_pct = snapshot.clamped_queue_percent
 
-        line1 = Text(no_wrap=True, overflow="ellipsis")
+        overflow_mode: Literal["ellipsis", "crop"] = (
+            "ellipsis" if glyphs.rule_char != "-" else "crop"
+        )
+        line1 = Text(no_wrap=True, overflow=overflow_mode)
         line1.append("LBS ", style=_style(f"bold {CYAN}", use_color))
         line1.append(
             f"Q:{queue_pct:.1f}% ({snapshot.current_job_idx}/{snapshot.total_jobs}) ",
@@ -600,7 +603,7 @@ class DashboardRenderer:
             style=_style(f"bold {st_color}", use_color),
         )
 
-        line2 = Text(no_wrap=True, overflow="ellipsis")
+        line2 = Text(no_wrap=True, overflow=overflow_mode)
         line2.append(
             f"{snapshot.target_name or '-'} ",
             style=_style(f"bold {YELLOW}", use_color),
