@@ -222,7 +222,7 @@ def render_plain_milestone(
             f"{snapshot.passed_jobs} passed, {snapshot.failed_jobs} failed, "
             f"{snapshot.remaining_jobs} remaining)"
         ),
-        f"[LBS] Active target: '{snapshot.target_name}'{phase_suffix} [{snapshot.status_label}]",
+        f"[LBS] Now starting: '{snapshot.target_name}'{phase_suffix} [{snapshot.status_label}]",
     ]
     if cmd_text:
         lines.append(f"[LBS] Command: {cmd_text}")

@@ -23,6 +23,17 @@ import threading
 import time
 
 from lbs.config import Config, Job, BuildStatus, resolve_status_path, load_config
+from lbs.ui import (
+    BuildProgress,
+    BuildProgressParser,
+    DashboardRenderer,
+    DashboardSnapshot,
+    ExecutionStatus,
+    SplitViewportManager,
+    TerminalCapabilities,
+    detect_capabilities,
+    render_plain_milestone,
+)
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
 from lbs.utils.sanitizer import sanitize_console_output
@@ -1083,6 +1094,11 @@ def _execute_job_attempt(
                 env=job.env,
                 log_file=job_log,
                 timeout=timeout_sec,
+                on_output_line=(
+                    progress_reporter.on_compiler_output_line
+                    if progress_reporter is not None
+                    else None
+                ),
             )
 
             if monitor:
@@ -1369,21 +1385,24 @@ def _resolve_execution_filters(
 
 
 class _QueueProgressReporter:
-    """Manages real-time queue progress bar, milestone dividers, and window titles.
+    """Manages the live btop-inspired dashboard, quiet progress bar, milestone
+    dividers, build progress parsing, 1 Hz elapsed ticker, and window titles.
 
     In Default (streaming) mode:
-      On a TTY, sets up a 25% / 75% split-screen console via DECSTBM scrolling regions:
-        - Top ~25%: Pinned, persistent live status dashboard updating in real-time.
-        - Bottom ~75%: Live compiler/child output scrolls continuously.
-      On non-TTY (pipes/CI), outputs clean sequential milestone divider text blocks.
+      On an interactive ANSI/VT TTY, delegates to SplitViewportManager (DECSTBM)
+      and DashboardRenderer (Rich) to pin a color-coded dashboard at the top while
+      raw sanitized compiler output scrolls natively below.
+      On non-TTY or unsupported terminals (pipes/CI/TERM=dumb), outputs clean
+      plain-text milestone divider blocks without ANSI escape sequences.
 
     In --quiet mode:
       Renders an in-place single-line progress bar with carriage return (\\r) if stdout is a TTY.
       When a job/phase completes, clears the bar and prints a frozen summary line (e.g. [PASS] 'job-name').
 
     In both modes:
-      Updates the terminal tab/window title via ANSI OSC escape sequences if stdout is a TTY.
-      Cleans up terminal margins cleanly on completion, Ctrl+C, or exit via atexit.
+      Updates the terminal tab/window title via ANSI OSC escape sequences if supported.
+      Cleans up background ticker threads and terminal margins cleanly on completion,
+      Ctrl+C, or exit via atexit.
     """
 
     def __init__(
@@ -1396,19 +1415,33 @@ class _QueueProgressReporter:
         force_tty: bool | None = None,
         lock=None,
         scheduled_tasks: list[CommandTask] | None = None,
+        enable_ticker: bool = True,
+        tick_interval: float = 1.0,
+        progress_redraw_interval: float = 0.20,
     ) -> None:
         self.total_jobs = max(1, total_jobs)
         self.total_commands = max(0, total_commands)
         self.session_start_time = session_start_time
+        self.active_phase_start_time = session_start_time
         self.is_quiet = is_quiet
         self.stream = stream if stream is not None else sys.stdout
-        if force_tty is not None:
-            self.is_tty = force_tty
-        else:
-            self.is_tty = getattr(self.stream, "isatty", lambda: False)()
         self.lock = lock if lock is not None else threading.RLock()
+        self.capabilities: TerminalCapabilities = detect_capabilities(
+            self.stream, force_tty=force_tty
+        )
+        self.is_tty = self.capabilities.is_tty
         self.scheduled_tasks = scheduled_tasks
         self.current_phase_tasks: list[CommandTask] | None = None
+
+        self.renderer = DashboardRenderer()
+        self.viewport = SplitViewportManager(
+            stream=self.stream,
+            capabilities=self.capabilities,
+            lock=self.lock,
+        )
+        self.progress_parser = BuildProgressParser()
+        self.current_build_progress: BuildProgress | None = None
+        self.execution_status: ExecutionStatus = ExecutionStatus.RUNNING
 
         self.completed_jobs = 0
         self.failed_jobs_count = 0
@@ -1427,79 +1460,150 @@ class _QueueProgressReporter:
         self.last_rendered_len = 0
         self.active_bar_active = False
 
-        # Split screen state (Top ~25% pinned dashboard, Bottom ~75% scrolling output)
-        self.split_active = False
-        self.status_start = 1
-        self.status_lines_count = 5
-        self.scroll_start = 6
-        self.scroll_end = 24
-        self.last_term_lines = 24
-        self.last_term_cols = 80
+        # Live refresh ticker & output-driven redraw throttling
+        self._enable_ticker = enable_ticker
+        self._tick_interval = max(0.05, tick_interval)
+        self._progress_redraw_interval = max(0.0, progress_redraw_interval)
+        self._last_progress_render_time = 0.0
+        self._ticker_stop = threading.Event()
+        self._ticker_thread: threading.Thread | None = None
 
-        if self.is_tty and not self.is_quiet:
+        if self.capabilities.supports_split_screen and not self.is_quiet:
             try:
                 atexit.register(self.disable_split_screen)
             except Exception:
                 pass
 
+    @property
+    def split_active(self) -> bool:
+        return self.viewport.active
+
+    @split_active.setter
+    def split_active(self, value: bool) -> None:
+        self.viewport.active = bool(value)
+
+    @property
+    def status_start(self) -> int:
+        return self.viewport.status_start
+
+    @property
+    def status_lines_count(self) -> int:
+        return self.viewport.status_lines_count
+
+    @property
+    def scroll_start(self) -> int:
+        return self.viewport.scroll_start
+
+    @property
+    def scroll_end(self) -> int:
+        return self.viewport.scroll_end
+
+    @property
+    def last_term_lines(self) -> int:
+        return self.viewport.last_term_lines
+
+    @property
+    def last_term_cols(self) -> int:
+        return self.viewport.last_term_cols
+
+    def _start_ticker(self) -> None:
+        if not self._enable_ticker or not self.is_tty:
+            return
+        if self._ticker_thread is not None and self._ticker_thread.is_alive():
+            return
+        self._ticker_stop.clear()
+        self._ticker_thread = threading.Thread(
+            target=self._ticker_loop,
+            name="lbs-dashboard-ticker",
+            daemon=True,
+        )
+        self._ticker_thread.start()
+
+    def _stop_ticker(self) -> None:
+        self._ticker_stop.set()
+        thread = self._ticker_thread
+        self._ticker_thread = None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def _ticker_loop(self) -> None:
+        while not self._ticker_stop.wait(self._tick_interval):
+            try:
+                with self.lock:
+                    if self._ticker_stop.is_set():
+                        break
+                    if self.split_active and not self.is_quiet:
+                        self.render_split_dashboard()
+                    elif self.is_quiet and self.is_tty and self.active_bar_active:
+                        self.render_quiet_bar()
+            except Exception:
+                break
+
+    def _build_snapshot(self) -> DashboardSnapshot:
+        now = time.perf_counter()
+        remaining = max(0, self.total_jobs - self.completed_jobs - self.failed_jobs_count)
+        return DashboardSnapshot(
+            queue_percent=self._get_progress_percent_float(),
+            current_job_idx=self.current_job_idx,
+            total_jobs=self.total_jobs,
+            completed_commands=self.completed_commands,
+            total_commands=self.total_commands,
+            build_progress=self.current_build_progress,
+            total_elapsed_seconds=max(0.0, now - self.session_start_time),
+            active_elapsed_seconds=max(0.0, now - self.active_phase_start_time),
+            passed_jobs=self.completed_jobs,
+            failed_jobs=self.failed_jobs_count,
+            remaining_jobs=remaining,
+            target_name=self.current_job_name,
+            phase_name=self.current_phase_name or "default",
+            command_text=sanitize_console_output(self.current_command_text or ""),
+            log_path=self.current_log_path,
+            cmd_idx=self.current_cmd_idx,
+            phase_cmd_total=self.current_phase_cmd_total,
+            status=self.execution_status,
+            retry_attempt=self.current_retry_attempt,
+            max_retries=self.current_max_retries,
+        )
+
     def enable_split_screen(self) -> None:
         with self.lock:
-            if not self.is_tty or self.is_quiet or self.split_active:
+            if not self.capabilities.supports_split_screen or self.is_quiet or self.split_active:
                 return
-            term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-            if term_lines < 12:
+            term_cols, term_lines = self.viewport.get_terminal_size()
+            if term_lines < self.viewport.min_terminal_lines:
                 return
 
-            self.status_lines_count = max(5, min(8, int(term_lines * 0.25)))
-            self.status_start = 1
-            self.scroll_start = self.status_lines_count + 1
-            self.scroll_end = term_lines
-            self.last_term_lines = term_lines
-            self.last_term_cols = term_cols
-            self.split_active = True
-
-            if sys.platform == "win32":
-                try:
-                    os.system("")
-                except Exception:
-                    pass
-
-            # Clear screen, scrollback buffer, and home cursor before setting scroll region
-            self.stream.write("\033[2J\033[3J\033[H")
-            # Set bottom scrolling region (rows scroll_start..scroll_end), leaving top rows pinned
-            self.stream.write(f"\033[{self.scroll_start};{self.scroll_end}r")
-            self.stream.write(f"\033[{self.scroll_start};1H")
-            self.stream.flush()
-            self.render_split_dashboard()
+            initial_rows = self.renderer.render(
+                self._build_snapshot(),
+                width=term_cols,
+                height=term_lines,
+                profile=self.capabilities,
+            )
+            if not self.viewport.enable(initial_height=len(initial_rows)):
+                return
+            self.viewport.paint(initial_rows)
+            self._start_ticker()
 
     def disable_split_screen(self) -> None:
+        self._stop_ticker()
         with self.lock:
-            if not self.split_active:
-                return
-            try:
-                # Reset scrolling margins to full terminal height
-                self.stream.write("\033[r")
-                _, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-                # Move cursor to bottom row, ensure visible, and move to a fresh clear line below dashboard
-                self.stream.write(f"\033[{term_lines};1H\033[?25h\n\033[K")
-                self.stream.flush()
-            except Exception:
-                pass
-            finally:
-                self.split_active = False
+            self.viewport.disable()
 
     def _get_elapsed_str(self) -> str:
-        elapsed = int(time.perf_counter() - self.session_start_time)
+        elapsed = int(max(0.0, time.perf_counter() - self.session_start_time))
         hrs, rem = divmod(elapsed, 3600)
         mins, secs = divmod(rem, 60)
         return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
-    def _get_progress_percent(self) -> int:
+    def _get_progress_percent_float(self) -> float:
         if self.total_commands <= 0:
             if self.total_jobs <= 0:
-                return 100
-            return min(100, int((self.completed_jobs / self.total_jobs) * 100))
-        return min(100, int((self.completed_commands / self.total_commands) * 100))
+                return 100.0
+            return min(100.0, max(0.0, (self.completed_jobs / self.total_jobs) * 100.0))
+        return min(100.0, max(0.0, (self.completed_commands / self.total_commands) * 100.0))
+
+    def _get_progress_percent(self) -> int:
+        return int(self._get_progress_percent_float())
 
     def _safe_chars(self) -> tuple[str, str, str]:
         encoding = getattr(self.stream, "encoding", None) or getattr(sys.stdout, "encoding", None) or "utf-8"
@@ -1511,7 +1615,7 @@ class _QueueProgressReporter:
 
     def update_window_title(self, title: str) -> None:
         with self.lock:
-            if not self.is_tty:
+            if not self.capabilities.supports_osc_title:
                 return
             try:
                 self.stream.write(f"\033]0;{title}\007")
@@ -1544,8 +1648,13 @@ class _QueueProgressReporter:
                 cmd_display = f"{self.current_cmd_idx}/{self.current_phase_cmd_total}" if self.current_phase_cmd_total > 0 else ""
 
             retry_display = f", retry {self.current_retry_attempt - 1}/{self.current_max_retries}" if self.current_retry_attempt > 1 else ""
+            build_display = (
+                f", build {self.current_build_progress.percent:.1f}%"
+                if self.current_build_progress is not None
+                else ""
+            )
 
-            detail = f"({phase_display}{cmd_display}{retry_display})"
+            detail = f"({phase_display}{cmd_display}{retry_display}{build_display})"
             detail_part = f" {detail}" if detail != "()" else ""
 
             filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
@@ -1583,140 +1692,63 @@ class _QueueProgressReporter:
             if not self.split_active or not self.is_tty or self.is_quiet:
                 return
 
-            # 1. Hide cursor, save cursor position (both DEC \0337 and ANSI \033[s)
-            self.stream.write("\033[?25l\0337\033[s")
+            term_cols, term_lines = self.viewport.get_terminal_size()
+            rows = self.renderer.render(
+                self._build_snapshot(),
+                width=term_cols,
+                height=term_lines,
+                profile=self.capabilities,
+            )
+            self.viewport.paint(rows)
 
-            term_cols, term_lines = shutil.get_terminal_size(fallback=(80, 24))
-            term_cols = max(1, term_cols)
-            term_lines = max(1, term_lines)
-
-            old_term_lines = getattr(self, "last_term_lines", term_lines)
-            old_term_cols = getattr(self, "last_term_cols", term_cols)
-            old_status_start = max(1, getattr(self, "status_start", 1))
-            old_status_lines_count = max(1, getattr(self, "status_lines_count", 5))
-            old_scroll_start = max(1, getattr(self, "scroll_start", old_status_start + old_status_lines_count))
-
-            # Handle dynamic terminal resize (lines or columns)
-            if term_lines != old_term_lines or term_cols != old_term_cols:
-                desired_status_lines = max(5, min(8, int(term_lines * 0.25)))
-                if term_lines > 1:
-                    new_status_lines_count = min(desired_status_lines, term_lines - 1)
-                    new_status_start = 1
-                    new_scroll_start = new_status_lines_count + 1
-                    new_scroll_end = term_lines
-                else:
-                    new_status_lines_count = 1
-                    new_status_start = 1
-                    new_scroll_start = 1
-                    new_scroll_end = 1
-
-                # Erase old dashboard area (old_status_start .. old dashboard bottom)
-                # and new dashboard area (new_status_start .. new dashboard bottom),
-                # clamped to term_lines so we never write past the last row.
-                old_dashboard_bottom = old_status_start + old_status_lines_count - 1
-                new_dashboard_bottom = new_status_start + new_status_lines_count - 1
-                erase_start = max(1, min(old_status_start, new_status_start))
-                erase_end = min(term_lines, max(old_dashboard_bottom, new_dashboard_bottom))
-                for row in range(erase_start, erase_end + 1):
-                    self.stream.write(f"\033[{row};1H\033[2K")
-
-                self.status_lines_count = new_status_lines_count
-                self.status_start = new_status_start
-                self.scroll_start = new_scroll_start
-                self.scroll_end = new_scroll_end
-                self.last_term_lines = term_lines
-                self.last_term_cols = term_cols
-                self.stream.write(f"\033[{self.scroll_start};{self.scroll_end}r")
-
-                # Ensure cursor is left inside the scrolling region [scroll_start..scroll_end] after resize
-                if term_lines < old_term_lines:
-                    self.stream.write(f"\033[{self.scroll_end};1H\0337\033[s")
-                elif self.scroll_start > old_scroll_start:
-                    self.stream.write(f"\033[{self.scroll_start};1H\0337\033[s")
-                else:
-                    self.stream.write("\033[u\0338\0337\033[s")
-
-            fill_ch, empty_ch, div_ch = self._safe_chars()
-            pct = self._get_progress_percent()
-            elapsed_str = self._get_elapsed_str()
-
-            bar_width = min(20, max(8, term_cols - 45))
-            filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
-            bar = fill_ch * filled + empty_ch * (bar_width - filled)
-
-            phase_part = f" (phase '{self.current_phase_name}')" if self.current_phase_name and self.current_phase_name != "default" else ""
-            cmd_part = f"[{self.current_cmd_idx}/{self.current_phase_cmd_total}]" if self.current_phase_cmd_total > 0 else ""
-            raw_cmd_text = sanitize_console_output(self.current_command_text or "")
-            cmd_text = raw_cmd_text.replace("\n", " ").replace("\t", " ").strip()
-            avail_cmd = max(10, term_cols - 25)
-            if len(cmd_text) > avail_cmd:
-                cmd_text = cmd_text[:avail_cmd - 3] + "..."
-
-            divider_line = f"[LBS] {div_ch * max(10, term_cols - 7)}"
-            bar_line = f"[LBS] [{bar}] {pct}% [{self.current_job_idx}/{self.total_jobs}] | '{self.current_job_name}'{phase_part}"
-            cmd_line = f"[LBS] Active: {cmd_part} {cmd_text}".rstrip()
-            remaining_cnt = max(0, self.total_jobs - self.completed_jobs - self.failed_jobs_count)
-            stats_line = f"[LBS] Elapsed: {elapsed_str} | Queue: {self.completed_jobs} passed, {self.failed_jobs_count} failed | Remaining: {remaining_cnt}"
-            log_line = f"[LBS] Active log: {self.current_log_path}" if self.current_log_path else ""
-
-            dashboard_lines = [
-                divider_line,
-                bar_line,
-                cmd_line,
-                stats_line,
-            ]
-            if self.status_lines_count >= 6 and log_line:
-                dashboard_lines.append(log_line)
-            if self.status_lines_count >= 7:
-                dashboard_lines.append(divider_line)
-
-            status_end = min(term_lines, self.status_start + self.status_lines_count - 1)
-            max_dashboard_rows = max(0, status_end - self.status_start + 1)
-            visible_dashboard_lines = dashboard_lines[:max_dashboard_rows]
-
-            # Draw to the top pinned region without touching the bottom scrolling area,
-            # erasing each row first (\033[2K) and clearing to end of line (\033[K).
-            for idx, d_line in enumerate(visible_dashboard_lines):
-                row = self.status_start + idx
-                if row > term_lines:
-                    break
-                if len(d_line) >= term_cols:
-                    d_line = d_line[:max(0, term_cols - 1)]
-                self.stream.write(f"\033[{row};1H\033[2K{d_line}\033[K")
-
-            # Clear any remaining unused lines within the top status pane
-            for row in range(self.status_start + len(visible_dashboard_lines), status_end + 1):
-                self.stream.write(f"\033[{row};1H\033[2K\033[K")
-
-            # 2. Restore cursor back to the scrolling region (both ANSI \033[u and DEC \0338), show cursor
-            self.stream.write("\033[u\0338\033[?25h")
-            self.stream.flush()
+    def on_compiler_output_line(self, line: str) -> None:
+        """Consumes a sanitized compiler output chunk to update active build progress."""
+        with self.lock:
+            updated = self.progress_parser.feed_line(line)
+            if updated is None:
+                return
+            self.current_build_progress = updated
+            now = time.perf_counter()
+            is_complete = updated.completed >= updated.total
+            if not is_complete and (now - self._last_progress_render_time) < self._progress_redraw_interval:
+                return
+            self._last_progress_render_time = now
+            if self.split_active:
+                self.render_split_dashboard()
+            elif self.is_quiet and self.is_tty:
+                self.render_quiet_bar()
 
     def print_milestone_divider(self, job: Job, phase_name: str, log_path: Path | str) -> None:
         with self.lock:
             if self.is_quiet or self.split_active:
                 return
-
-            fill_ch, empty_ch, div_ch = self._safe_chars()
-            pct = self._get_progress_percent()
-            bar_width = 16
-            filled = max(0, min(bar_width, int((pct / 100) * bar_width)))
-            bar = fill_ch * filled + empty_ch * (bar_width - filled)
-
-            phase_suffix = f" (phase: {phase_name})" if phase_name and phase_name != "default" else ""
-            divider_line = f"[LBS] {div_ch * 60}"
-            elapsed_str = self._get_elapsed_str()
-
-            lines = [
-                "",
-                divider_line,
-                f"[LBS] Queue Progress: [{bar}] {pct}% ({self.completed_jobs} of {self.total_jobs} jobs completed)",
-                f"[LBS] Now starting: '{job.name}'{phase_suffix}",
-                f"[LBS] Elapsed: {elapsed_str} | Active log: {log_path}",
-                divider_line,
-                "",
-            ]
-            self.stream.write("\n".join(lines))
+            snapshot = self._build_snapshot()
+            # Ensure snapshot reflects explicit call arguments even if called directly
+            snapshot = DashboardSnapshot(
+                queue_percent=snapshot.queue_percent,
+                current_job_idx=snapshot.current_job_idx,
+                total_jobs=snapshot.total_jobs,
+                completed_commands=snapshot.completed_commands,
+                total_commands=snapshot.total_commands,
+                build_progress=snapshot.build_progress,
+                total_elapsed_seconds=snapshot.total_elapsed_seconds,
+                active_elapsed_seconds=snapshot.active_elapsed_seconds,
+                passed_jobs=snapshot.passed_jobs,
+                failed_jobs=snapshot.failed_jobs,
+                remaining_jobs=snapshot.remaining_jobs,
+                target_name=job.name,
+                phase_name=phase_name,
+                command_text=snapshot.command_text,
+                log_path=str(log_path),
+                cmd_idx=snapshot.cmd_idx,
+                phase_cmd_total=snapshot.phase_cmd_total,
+                status=snapshot.status,
+                retry_attempt=snapshot.retry_attempt,
+                max_retries=snapshot.max_retries,
+            )
+            self.stream.write(
+                render_plain_milestone(snapshot, use_unicode=self.capabilities.use_unicode)
+            )
             self.stream.flush()
 
     def start_phase(
@@ -1740,6 +1772,12 @@ class _QueueProgressReporter:
             self.current_log_path = str(log_path)
             self.current_retry_attempt = attempt
             self.current_max_retries = job.retries
+            self.active_phase_start_time = time.perf_counter()
+            self.progress_parser.reset()
+            self.current_build_progress = None
+            self.execution_status = (
+                ExecutionStatus.RETRYING if attempt > 1 else ExecutionStatus.RUNNING
+            )
 
             phase_part = f" ({phase_name})" if phase_name and phase_name != "default" else ""
             title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {job.name}{phase_part}"
@@ -1752,10 +1790,17 @@ class _QueueProgressReporter:
                     self.print_milestone_divider(job, phase_name, log_path)
             else:
                 self.render_quiet_bar()
+                self._start_ticker()
 
     def set_attempt(self, attempt: int, total_attempts: int) -> None:
         with self.lock:
             self.current_retry_attempt = attempt
+            self.active_phase_start_time = time.perf_counter()
+            self.progress_parser.reset()
+            self.current_build_progress = None
+            self.execution_status = (
+                ExecutionStatus.RETRYING if attempt > 1 else ExecutionStatus.RUNNING
+            )
             if self.is_quiet:
                 self.render_quiet_bar()
             elif self.split_active:
@@ -1763,6 +1808,7 @@ class _QueueProgressReporter:
 
     def on_command_update(self, job_command_tasks: dict[str, list[CommandTask]]) -> None:
         with self.lock:
+            prev_cmd_idx = self.current_cmd_idx
             if self.scheduled_tasks is not None:
                 self.completed_commands = sum(
                     1 for t in self.scheduled_tasks if t.status == BuildStatus.DONE
@@ -1800,6 +1846,10 @@ class _QueueProgressReporter:
                 if phase_tasks:
                     self.current_command_text = phase_tasks[-1].command
 
+            if self.current_cmd_idx != prev_cmd_idx:
+                self.progress_parser.reset()
+                self.current_build_progress = None
+
             phase_part = f" ({self.current_phase_name})" if self.current_phase_name and self.current_phase_name != "default" else ""
             title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {self.current_job_name}{phase_part}"
             self.update_window_title(title)
@@ -1820,6 +1870,7 @@ class _QueueProgressReporter:
         with self.lock:
             if not success:
                 self._failed_job_names.add(job_name)
+                self.execution_status = ExecutionStatus.FAILED
 
             if is_last_phase and job_name not in self._finished_jobs:
                 self._finished_jobs.add(job_name)
@@ -1843,16 +1894,22 @@ class _QueueProgressReporter:
                 self.render_split_dashboard()
 
     def finish(self, session_success: bool) -> None:
+        self._stop_ticker()
         with self.lock:
+            self.execution_status = (
+                ExecutionStatus.COMPLETED if session_success else ExecutionStatus.FAILED
+            )
             self.clear_quiet_bar()
-            self.disable_split_screen()
+            self.viewport.disable()
             status_str = "SUCCESS" if session_success else "FAILED"
             self.update_window_title(f"LBS: Session {status_str}")
 
     def finish_interrupted(self) -> None:
+        self._stop_ticker()
         with self.lock:
+            self.execution_status = ExecutionStatus.INTERRUPTED
             self.clear_quiet_bar()
-            self.disable_split_screen()
+            self.viewport.disable()
             self.update_window_title("LBS: Session CANCELLED (Ctrl+C)")
 
 

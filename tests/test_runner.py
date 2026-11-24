@@ -846,9 +846,11 @@ def test_queue_progress_reporter_split_screen_enable_disable():
 
 
 def test_queue_progress_reporter_split_screen_dashboard_render():
-    """Ticket 10: Verifies that split-screen dashboard paints to bottom rows with cursor restore."""
+    """Verify that split-screen dashboard paints the btop-inspired panels with cursor restore."""
     import io
+    import re
     import time
+    from unittest.mock import patch
     from lbs.runner import _QueueProgressReporter, CommandTask
 
     stream = io.StringIO()
@@ -859,26 +861,30 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
         is_quiet=False,
         stream=stream,
         force_tty=True,
+        enable_ticker=False,
     )
 
-    reporter.enable_split_screen()
-    job = Job(name="build-app", cwd=".")
-    tasks = [
-        CommandTask(index=0,
-                    phase="compile",
-                    command="python3 build.py --shared"),
-        CommandTask(index=1, phase="compile", command="python3 package.py"),
-    ]
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 34))):
+        reporter.enable_split_screen()
+        job = Job(name="build-app", cwd=".")
+        tasks = [
+            CommandTask(index=0,
+                        phase="compile",
+                        command="python3 build.py --shared --debug"),
+            CommandTask(index=1, phase="compile", command="python3 package.py"),
+        ]
 
-    reporter.start_phase(
-        job=job,
-        phase_name="compile",
-        cmds_to_run_tasks=tasks,
-        log_path="logs/build-app.log",
-        job_idx=1,
-    )
+        reporter.start_phase(
+            job=job,
+            phase_name="compile",
+            cmds_to_run_tasks=tasks,
+            log_path="logs/build-app.log",
+            job_idx=1,
+        )
+        reporter.disable_split_screen()
 
     val = stream.getvalue()
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", val)
     # Hides cursor and saves cursor position
     assert "\033[?25l" in val
     assert "\033[s" in val or "\0337" in val
@@ -889,10 +895,17 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
     assert "\033[u" in val or "\0338" in val
     assert "\033[?25h" in val
 
-    # Contains expected dashboard fields
-    assert "'build-app'" in val
-    assert "Active:" in val
-    assert "Elapsed:" in val
+    # Contains expected structured btop dashboard sections
+    assert "LBS / BUILD MONITOR" in plain
+    assert "PASSED" in plain
+    assert "FAILED" in plain
+    assert "REMAINING" in plain
+    assert "ACTIVE TARGET" in plain
+    assert "build-app" in plain
+    assert "COMPILE" in plain
+    assert "python3 build.py --shared --debug" in plain
+    assert "logs/build-app.log" in plain
+    assert "LIVE COMPILER OUTPUT" in plain
 
 
 def test_queue_progress_reporter_split_screen_disabled_in_quiet_and_non_tty():
@@ -1213,7 +1226,7 @@ def test_split_screen_reproduction_with_clink_and_ansi_job_output(tmp_path, caps
 
 def test_split_screen_dashboard_resize_erases_old_rows():
     """Verify that when terminal height or width changes between render_split_dashboard() calls,
-    all old dashboard rows are erased with ESC[row;1H ESC[2K before the new dashboard is drawn.
+    all old dashboard rows are erased with ESC[row;1H ESC[2K before the new scroll region and redraw.
     """
     import io
     import re
@@ -1229,10 +1242,11 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         is_quiet=False,
         stream=stream,
         force_tty=True,
+        enable_ticker=False,
     )
 
-    # Start at 80x24 -> status_start=1, status_lines_count=6 (rows 1..6), scroll_start=7, scroll_end=24
-    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 24))):
+    # Start at 100x32 -> full btop layout (15 rows: 1..15, scroll 16..32)
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 32))):
         reporter.enable_split_screen()
         job = Job(name="asb-c-second", cwd=".")
         tasks = [
@@ -1248,66 +1262,57 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         )
 
     assert reporter.status_start == 1
-    assert reporter.status_lines_count == 6
-    assert reporter.scroll_start == 7
-    assert reporter.scroll_end == 24
-
-    # Clear stream buffer to inspect the resize render in isolation
-    stream.seek(0)
-    stream.truncate(0)
-
-    # Grow terminal to 80x32 -> status_start=1, status_lines_count=8 (rows 1..8), scroll_start=9, scroll_end=32
-    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 32))):
-        reporter.completed_commands = 3
-        reporter.render_split_dashboard()
-
-    out_grow = stream.getvalue()
-    assert reporter.status_start == 1
-    assert reporter.status_lines_count == 8
-    assert reporter.scroll_start == 9
+    assert reporter.status_lines_count == 15
+    assert reporter.scroll_start == 16
     assert reporter.scroll_end == 32
 
-    # Old dashboard rows 1..6 and new dashboard rows 1..8 must be erased with \033[{row};1H\033[2K
-    # before the new scroll region & redraw
-    new_region_idx = out_grow.index("\033[9;32r")
-    new_draw_idx = out_grow.index("\033[1;1H\033[2K[LBS]")
-    for old_row in range(1, 7):
-        erase_seq = f"\033[{old_row};1H\033[2K"
-        assert erase_seq in out_grow
-        assert out_grow.index(erase_seq) < new_region_idx < new_draw_idx
-
-    # Every new dashboard row (1..6) and unused top status rows (7..8) also use \033[2K
-    for r in range(1, 9):
-        assert f"\033[{r};1H\033[2K" in out_grow
-
-    # Cursor is restored at the end
-    assert out_grow.endswith("\033[u\0338\033[?25h")
-
-    # Now shrink terminal to 70x20 -> status_start=1, status_lines_count=5 (rows 1..5), scroll_start=6, scroll_end=20
+    # Shrink terminal to 70x20 -> switches to compact tier (~7-8 rows, scroll <= 20)
     stream.seek(0)
     stream.truncate(0)
     with patch("shutil.get_terminal_size", return_value=os.terminal_size((70, 20))):
+        reporter.completed_commands = 3
         reporter.render_split_dashboard()
 
     out_shrink = stream.getvalue()
     assert reporter.status_start == 1
-    assert reporter.status_lines_count == 5
-    assert reporter.scroll_start == 6
+    assert reporter.status_lines_count < 15
+    assert reporter.scroll_start == reporter.status_lines_count + 1
     assert reporter.scroll_end == 20
 
-    # Old dashboard rows 1..8 (including rows 6..8 which are now part of the scrolling region!)
-    # must be erased with \033[2K before setting the new scroll region \033[6;20r
-    shrink_region_idx = out_shrink.index("\033[6;20r")
-    for r in range(1, 9):
+    # All old dashboard rows 1..15 (including rows now inside the scrolling region)
+    # must be erased with \033[2K before setting the new scroll region
+    shrink_region_seq = f"\033[{reporter.scroll_start};20r"
+    shrink_region_idx = out_shrink.index(shrink_region_seq)
+    for r in range(1, 16):
         erase_seq = f"\033[{r};1H\033[2K"
         assert erase_seq in out_shrink
         assert out_shrink.index(erase_seq) < shrink_region_idx
     assert "\033[20;1H\0337\033[s" in out_shrink
+    assert out_shrink.endswith("\033[u\0338\033[?25h")
 
     # Nothing may be drawn or addressed beyond row 20 (the shrunk terminal height)
     addressed_rows = [int(m) for m in re.findall(r"\x1b\[(\d+);1H", out_shrink)]
     assert addressed_rows
     assert max(addressed_rows) <= 20
+
+    # Grow terminal back to 110x36 -> returns to full 15-row layout
+    stream.seek(0)
+    stream.truncate(0)
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((110, 36))):
+        reporter.render_split_dashboard()
+
+    out_grow = stream.getvalue()
+    assert reporter.status_lines_count == 15
+    assert reporter.scroll_start == 16
+    assert reporter.scroll_end == 36
+    grow_region_idx = out_grow.index("\033[16;36r")
+    for r in range(1, 16):
+        erase_seq = f"\033[{r};1H\033[2K"
+        assert erase_seq in out_grow
+        assert out_grow.index(erase_seq) < grow_region_idx
+    assert out_grow.endswith("\033[u\0338\033[?25h")
+
+    reporter.disable_split_screen()
 
 
 def test_split_screen_dashboard_tiny_terminal_shrink_clamps_safely():
@@ -1372,6 +1377,174 @@ def test_generate_job_script_silences_internal_progress_lines_on_windows(tmp_pat
     assert f'@>>"{prog_path}" echo START:1' in script
     assert "@if %ERRORLEVEL% neq 0 (" in script
     assert script.count("@echo off") >= 2
+
+
+def test_queue_progress_reporter_live_build_progress_and_throttling():
+    """Phase 5: Verify Ninja/Siso compiler output updates build progress with redraw throttling."""
+    import io
+    import re
+    import time
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=2,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+        enable_ticker=False,
+        progress_redraw_interval=60.0,  # Very large interval to deterministically test throttling
+    )
+
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 34))):
+        reporter.enable_split_screen()
+        job = Job(name="asb-d-main", cwd=".")
+        tasks = [CommandTask(index=0, phase="build", command="python3 build.py --debug")]
+        reporter.start_phase(
+            job=job,
+            phase_name="build",
+            cmds_to_run_tasks=tasks,
+            log_path=r"logs\2026-11-11_asb-d-main_build.log",
+            job_idx=2,
+        )
+
+        # First progress line paints immediately (past initial 0.0 timestamp)
+        stream.seek(0)
+        stream.truncate(0)
+        reporter.on_compiler_output_line(
+            "[43345/63295] 25m43.62s F CXX obj/content/browser/browser/sd_jwt.obj\n"
+        )
+        plain1 = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stream.getvalue())
+        assert "68.5%" in plain1
+        assert "43,345 / 63,295" in plain1
+
+        # Second intermediate line within throttle window updates state without repainting
+        stream.seek(0)
+        stream.truncate(0)
+        reporter.on_compiler_output_line(
+            "[43346/63295] 25m43.70s F CXX obj/content/browser/browser/next.obj\n"
+        )
+        assert stream.getvalue() == ""
+        assert reporter.current_build_progress is not None
+        assert reporter.current_build_progress.completed == 43346
+
+        # Final completion line [63295/63295] bypasses throttle and paints 100.0% immediately
+        reporter.on_compiler_output_line(
+            "[63295/63295] 32m10.00s F LINK chrome.exe\n"
+        )
+        plain_done = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stream.getvalue())
+        assert "100.0%" in plain_done
+        assert "63,295 / 63,295" in plain_done
+
+        reporter.disable_split_screen()
+
+
+def test_queue_progress_reporter_ticker_starts_updates_and_stops_cleanly():
+    """Phase 5: Verify background refresh ticker ticks elapsed time and exits cleanly on finish()."""
+    import io
+    import time
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    stream = io.StringIO()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=stream,
+        force_tty=True,
+        enable_ticker=True,
+        tick_interval=0.05,
+    )
+
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 34))):
+        reporter.enable_split_screen()
+        assert reporter._ticker_thread is not None
+        assert reporter._ticker_thread.is_alive()
+
+        job = Job(name="tick-job", cwd=".")
+        tasks = [CommandTask(index=0, phase="build", command="echo tick")]
+        reporter.start_phase(
+            job=job,
+            phase_name="build",
+            cmds_to_run_tasks=tasks,
+            log_path="logs/tick.log",
+            job_idx=1,
+        )
+        # Allow a couple of ticks to run without error
+        time.sleep(0.15)
+        ticker_ref = reporter._ticker_thread
+        reporter.finish(True)
+
+    assert reporter._ticker_thread is None
+    assert ticker_ref is not None and not ticker_ref.is_alive()
+
+
+def test_scheduler_btop_dashboard_keeps_log_files_free_of_ansi_and_borders(tmp_path, capsys):
+    """Phase 5: End-to-end run with simulated Chromium Siso output verifies dashboard renders
+    to stdout while session and job log files contain zero ANSI escapes or dashboard borders.
+    """
+    import re
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter
+
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=True, log_dir=str(log_dir), verbose=True)
+
+    siso_script = tmp_path / "siso_sim.py"
+    siso_script.write_text(
+        "import sys\n"
+        "print('[10/20] 0m01.10s F CXX obj/a.obj', flush=True)\n"
+        "print('[20/20] 0m02.20s F LINK chrome.exe', flush=True)\n",
+        encoding="utf-8",
+    )
+    py_cmd = f'"{sys.executable}" "{siso_script}" --debug'
+    jobs = [Job(name="asb-d-main", cwd=str(tmp_path), phases={"build": [py_cmd]})]
+    config = Config(settings=settings, jobs=jobs)
+
+    orig_init = _QueueProgressReporter.__init__
+
+    def force_tty_init(self, *args, **kwargs):
+        kwargs["force_tty"] = True
+        kwargs["progress_redraw_interval"] = 0.0
+        orig_init(self, *args, **kwargs)
+
+    with (
+        patch.object(_QueueProgressReporter, "__init__", force_tty_init),
+        patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 34))),
+    ):
+        success = run_scheduler(config)
+
+    assert success is True
+    captured = capsys.readouterr()
+    plain_out = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", captured.out)
+
+    # Dashboard rendered with live Siso progress and compiler output preserved
+    assert "LBS / BUILD MONITOR" in plain_out
+    assert "LIVE COMPILER OUTPUT" in plain_out
+    assert "100.0%" in plain_out
+    assert "20 / 20" in plain_out
+    assert "[10/20] 0m01.10s F CXX obj/a.obj" in plain_out
+    assert "[20/20] 0m02.20s F LINK chrome.exe" in plain_out
+    assert "\033[r" in captured.out
+
+    # Log files MUST remain completely free of ANSI escape sequences and dashboard borders
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    job_log_text = (log_dir / f"{date_str}_asb-d-main_build.log").read_text(encoding="utf-8")
+    session_log_text = (log_dir / f"{date_str}_session.log").read_text(encoding="utf-8")
+
+    for log_text in (job_log_text, session_log_text):
+        assert "\x1b" not in log_text
+        assert "╭" not in log_text
+        assert "╰" not in log_text
+        assert "LBS / BUILD MONITOR" not in log_text
+
+    assert "[10/20] 0m01.10s F CXX obj/a.obj" in job_log_text
+    assert "[20/20] 0m02.20s F LINK chrome.exe" in job_log_text
 
 
 
