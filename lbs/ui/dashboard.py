@@ -127,7 +127,7 @@ def _make_border_title(
     """Creates a left+right aligned title string embedded inside a Panel's top border.
 
     Produces borders matching:
-        ╭─ LBS / BUILD MONITOR ────────────────────────── ● RUNNING ─╮
+        ╭─ LOCAL BUILDS SCHEDULER ─────────────────────── ● RUNNING ─╮
     Gracefully collapses on narrow widths without overflowing panel_width.
     """
     # Rich Panel wraps title with "╭─ " (3 cols) on the left and " ─╮" (3 cols) on the right
@@ -193,6 +193,20 @@ def _sanitize_single_line(text: str) -> str:
     return " ".join((text or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").split())
 
 
+def _iter_inline_items(value: object) -> list[str]:
+    """Normalizes scalar/list/multiline values into a clean list of inline items."""
+    if isinstance(value, (list, tuple, set)):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = str(value).replace("\r", "\n").split("\n")
+    items: list[str] = []
+    for item in raw_items:
+        cleaned = " ".join(item.replace("\t", " ").split())
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
 def render_plain_milestone(
     snapshot: DashboardSnapshot,
     use_unicode: bool = False,
@@ -249,7 +263,10 @@ class DashboardRenderer:
         compact_padding: bool = False,
     ) -> Panel:
         st_color = status_color(snapshot.status)
-        left_title = Text("LBS / BUILD MONITOR", style=_style(f"bold {CYAN}", use_color))
+        left_title = Text(
+            "LOCAL BUILDS SCHEDULER",
+            style=_style(f"bold {CYAN}", use_color),
+        )
         right_title = Text(
             f"{glyphs.dot} {snapshot.status_label}",
             style=_style(f"bold {st_color}", use_color),
@@ -365,8 +382,17 @@ class DashboardRenderer:
 
         panels: list[Panel] = []
         for label, icon, count, color in specs:
-            body = Text()
-            body.append(f"{icon} {count}", style=_style(f"bold {color}", use_color))
+            inline_items = _iter_inline_items(count)
+            formatted_values: list[str] = []
+            for item in inline_items:
+                if item == icon or item.startswith(f"{icon} "):
+                    formatted_values.append(item)
+                else:
+                    formatted_values.append(f"{icon} {item}")
+            formatted_count = "  ".join(formatted_values) if formatted_values else f"{icon} 0"
+            body = Text(overflow="fold")
+            value = formatted_count.rstrip()
+            body.append(value, style=_style(f"bold {color}", use_color))
             panels.append(
                 Panel(
                     body,
@@ -477,7 +503,10 @@ class DashboardRenderer:
         use_color: bool,
     ) -> RenderableType:
         st_color = status_color(snapshot.status)
-        left_title = Text("LBS / MONITOR", style=_style(f"bold {CYAN}", use_color))
+        left_title = Text(
+            "LOCAL BUILDS SCHEDULER",
+            style=_style(f"bold {CYAN}", use_color),
+        )
         right_title = Text(
             f"{glyphs.dot} {snapshot.status_label}",
             style=_style(f"bold {st_color}", use_color),

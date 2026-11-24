@@ -720,7 +720,7 @@ When executing in an interactive terminal (TTY), LBS delivers a real-time, non-i
    - For minimal distraction, passing `-q` suppresses the compiler streaming viewport and renders a single-line in-place updating progress bar (`\r`).
    - When a phase or job finishes, it prints a permanent frozen completion milestone line (e.g. `[LBS] [PASS] 'job-name' (phase 'build') completed in 00:03:12`).
 3. **Dynamic Terminal / Tab Titles**:
-   - LBS emits ANSI OSC 0 escape sequences (`\033]0;...\007`) on supported terminals, updating your window or tab title to `[X/Y] (pct%) LBS: <job> (<phase>)` so you can glance at build progress while multitasking.
+   - LBS emits ANSI OSC 0 escape sequences (`\033]0;...\007`) on supported terminals, updating your window or tab title to `[X/Y] (pct%) Local Builds Scheduler: <job> (<phase>)` so you can glance at build progress while multitasking.
 4. **CI & Non-TTY Graceful Fallback**:
    - When output is redirected to a file, pipe, or CI runner (where `sys.stdout.isatty()` is False), ANSI scrolling margins and cursor positioning are automatically disabled, falling back to clean sequential stdout logging.
 

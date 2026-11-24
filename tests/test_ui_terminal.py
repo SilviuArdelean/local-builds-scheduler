@@ -98,6 +98,25 @@ def test_detect_capabilities_windows_terminal_and_ascii_codepage():
     assert caps_cp1252.use_unicode is False
 
 
+def test_detect_capabilities_cmder_uses_safe_non_split_fallback():
+    """Cmder keeps ANSI features but avoids unreliable DECSTBM split-screen."""
+    stream = _EncodedStream(encoding="utf-8", is_tty=True)
+
+    for env in (
+        {"CMDER_ROOT": r"C:\tools\cmder", "TERM": "xterm-256color"},
+        {"ConEmuPID": "1234", "ConEmuANSI": "ON", "TERM": "xterm-256color"},
+    ):
+        caps = detect_capabilities(
+            stream,
+            env=env,
+            platform="linux",
+        )
+        assert caps.is_tty is True
+        assert caps.use_ansi is True
+        assert caps.supports_osc_title is True
+        assert caps.supports_split_screen is False
+
+
 def test_viewport_enable_paint_row_diffing_and_disable():
     """Verify atomic row-level diffing: unchanged frames write 0 bytes, single-row changes repaint only that row."""
     stream = _EncodedStream(encoding="utf-8", is_tty=True)
@@ -132,8 +151,8 @@ def test_viewport_enable_paint_row_diffing_and_disable():
         out1 = stream.getvalue()
         for r in range(1, 5):
             assert f"\033[{r};1H\033[2K" in out1
-        assert out1.startswith("\033[?25l\0337\033[s")
-        assert out1.endswith("\033[u\0338\033[?25h")
+        assert out1.startswith("\033[?25l\033[?7l\0337")
+        assert out1.endswith("\0338\033[?7h\033[?25h")
 
         # Frame 2 (identical): writes ZERO bytes
         stream.seek(0)
@@ -148,9 +167,10 @@ def test_viewport_enable_paint_row_diffing_and_disable():
         assert vp.paint(frame3) is True
         out3 = stream.getvalue()
         assert "\033[3;1H\033[2Kelapsed 00:00:02\033[0m\033[K" in out3
-        assert "\033[1;1H" not in out3
-        assert "\033[2;1H" not in out3
-        assert "\033[4;1H" not in out3
+        for row_num in (1, 2, 3, 4):
+            assert f"\033[{row_num};1H\033[2K" in out3
+        assert "\033[?7l" in out3
+        assert "\033[?7h" in out3
 
         # Disable restores full-screen margins and cursor
         stream.seek(0)
@@ -160,6 +180,62 @@ def test_viewport_enable_paint_row_diffing_and_disable():
         out_disable = stream.getvalue()
         assert "\033[r" in out_disable
         assert "\033[30;1H\033[?25h\n\033[K" in out_disable
+
+
+def test_viewport_uses_supplied_terminal_size_consistently():
+    """A frame uses the caller's geometry snapshot instead of sampling during paint."""
+    stream = _EncodedStream(encoding="utf-8", is_tty=True)
+    caps = TerminalCapabilities(
+        is_tty=True,
+        use_ansi=True,
+        color_system="truecolor",
+        use_unicode=True,
+        supports_split_screen=True,
+        supports_osc_title=True,
+    )
+    vp = SplitViewportManager(stream=stream, capabilities=caps)
+
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 24))):
+        assert vp.enable(initial_height=3) is True
+
+    stream.seek(0)
+    stream.truncate(0)
+    assert vp.paint(
+        ["one", "two", "three"],
+        terminal_size=(120, 36),
+    ) is True
+
+    assert vp.last_term_cols == 120
+    assert vp.last_term_lines == 36
+    assert vp.scroll_end == 36
+
+
+def test_viewport_debounces_transient_terminal_sizes():
+    """A resized terminal is adopted after two consecutive identical samples."""
+    stream = _EncodedStream(encoding="utf-8", is_tty=True)
+    caps = TerminalCapabilities(
+        is_tty=True,
+        use_ansi=True,
+        color_system="truecolor",
+        use_unicode=True,
+        supports_split_screen=True,
+        supports_osc_title=True,
+    )
+    vp = SplitViewportManager(stream=stream, capabilities=caps)
+
+    sizes = iter([
+        os.terminal_size((80, 24)),
+        os.terminal_size((120, 36)),
+        os.terminal_size((100, 30)),
+        os.terminal_size((120, 36)),
+        os.terminal_size((120, 36)),
+    ])
+    with patch("shutil.get_terminal_size", side_effect=lambda fallback: next(sizes)):
+        assert vp.enable(initial_height=3) is True
+        assert vp.get_stable_terminal_size() == (80, 24)
+        assert vp.get_stable_terminal_size() == (80, 24)
+        assert vp.get_stable_terminal_size() == (80, 24)
+        assert vp.get_stable_terminal_size() == (120, 36)
 
 
 def test_viewport_dynamic_dashboard_height_and_terminal_resize():

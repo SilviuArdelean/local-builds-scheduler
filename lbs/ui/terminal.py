@@ -161,6 +161,7 @@ def detect_capabilities(
     use_unicode = _stream_supports_unicode(target_stream)
     term = (env_map.get("TERM") or "").strip().lower()
     no_color = bool(env_map.get("NO_COLOR"))
+    is_cmder = bool(env_map.get("CMDER_ROOT") or env_map.get("ConEmuPID"))
 
     if not is_tty or term == "dumb":
         return TerminalCapabilities(
@@ -193,7 +194,7 @@ def detect_capabilities(
             use_ansi=False,
             color_system=None,
             use_unicode=use_unicode,
-            supports_split_screen=True,
+            supports_split_screen=not is_cmder,
             supports_osc_title=True,
         )
 
@@ -203,13 +204,16 @@ def detect_capabilities(
         use_ansi=color_system is not None,
         color_system=color_system,
         use_unicode=use_unicode,
-        supports_split_screen=True,
+        # Cmder/ConEmu reflows DECSTBM-pinned rows inconsistently, especially
+        # during resize. Keep ANSI color/title support but use sequential
+        # milestones instead of the split-screen viewport there.
+        supports_split_screen=not is_cmder,
         supports_osc_title=True,
     )
 
 
 class SplitViewportManager:
-    """Manages a top-pinned DECSTBM dashboard viewport with flicker-free row diffing.
+    """Manages a top-pinned DECSTBM dashboard viewport with atomic repainting.
 
     Rows `1 .. status_lines_count` stay pinned at the top of the viewport while
     rows `scroll_start .. scroll_end` act as a native hardware scrolling region
@@ -240,12 +244,43 @@ class SplitViewportManager:
         self.last_term_cols = 80
         self.last_term_lines = 24
         self._last_rendered_rows: list[str] = []
+        self._pending_terminal_size: tuple[int, int] | None = None
+        self._pending_terminal_size_count = 0
         self._atexit_registered = False
 
     def get_terminal_size(self) -> tuple[int, int]:
         """Returns current (columns, lines), clamped to at least (1, 1)."""
         size = shutil.get_terminal_size(fallback=(80, 24))
         return max(1, size.columns), max(1, size.lines)
+
+    def get_stable_terminal_size(self) -> tuple[int, int]:
+        """Debounces transient sizes reported while a terminal is being resized."""
+        current = self.get_terminal_size()
+        active = (self.last_term_cols, self.last_term_lines)
+        if not self.active or current == active:
+            self._pending_terminal_size = None
+            self._pending_terminal_size_count = 0
+            return current
+
+        # Never keep drawing against a viewport larger than the real terminal.
+        # Shrinks are applied immediately; only growth is debounced to avoid
+        # repainting every intermediate maximize/drag size.
+        if current[0] < active[0] or current[1] < active[1]:
+            self._pending_terminal_size = None
+            self._pending_terminal_size_count = 0
+            return current
+
+        if current == self._pending_terminal_size:
+            self._pending_terminal_size_count += 1
+        else:
+            self._pending_terminal_size = current
+            self._pending_terminal_size_count = 1
+
+        if self._pending_terminal_size_count >= 2:
+            self._pending_terminal_size = None
+            self._pending_terminal_size_count = 0
+            return current
+        return active
 
     def invalidate(self) -> None:
         """Clears cached row contents so the next paint redraws all dashboard rows."""
@@ -291,18 +326,26 @@ class SplitViewportManager:
             self.stream.flush()
             return True
 
-    def paint(self, rows: list[str]) -> bool:
+    def paint(
+        self,
+        rows: list[str],
+        terminal_size: tuple[int, int] | None = None,
+    ) -> bool:
         """Paints rendered dashboard rows into the top-pinned region.
 
-        Uses row-level diffing when terminal size and dashboard height are unchanged,
-        skipping writes completely if the frame is identical. Returns True if any
-        terminal output was written, False otherwise.
+        Identical frames are skipped. Changed frames repaint the complete pinned
+        region so terminal reflow cannot leave fragments from a previous frame.
         """
         with self.lock:
             if not self.active:
                 return False
 
-            term_cols, term_lines = self.get_terminal_size()
+            if terminal_size is None:
+                term_cols, term_lines = self.get_terminal_size()
+            else:
+                term_cols, term_lines = terminal_size
+                term_cols = max(1, term_cols)
+                term_lines = max(1, term_lines)
             if term_lines > 1:
                 desired_height = max(1, min(len(rows), term_lines - 1))
             else:
@@ -332,15 +375,15 @@ class SplitViewportManager:
                 if not changed_indices:
                     return False
 
-                parts = ["\033[?25l\0337\033[s"]
-                for idx in changed_indices:
+                parts = ["\033[?25l\033[?7l\0337"]
+                for idx, line in enumerate(visible_rows):
                     row_num = self.status_start + idx
                     if row_num > term_lines:
                         break
                     parts.append(
-                        f"\033[{row_num};1H\033[2K{visible_rows[idx]}\033[0m\033[K"
+                        f"\033[{row_num};1H\033[2K{line}\033[0m\033[K"
                     )
-                parts.append("\033[u\0338\033[?25h")
+                parts.append("\0338\033[?7h\033[?25h")
 
                 self.stream.write("".join(parts))
                 self.stream.flush()
@@ -348,7 +391,7 @@ class SplitViewportManager:
                 return True
 
             # Geometry changed (terminal resized or dashboard height grew/shrank)
-            parts = ["\033[?25l\0337\033[s"]
+            parts = ["\033[?25l\033[?7l\0337"]
 
             new_status_start = 1
             if term_lines > 1:
@@ -378,11 +421,11 @@ class SplitViewportManager:
 
             # Keep saved cursor safely inside [scroll_start..scroll_end]
             if term_lines < old_term_lines:
-                parts.append(f"\033[{self.scroll_end};1H\0337\033[s")
+                parts.append(f"\033[{self.scroll_end};1H\0337")
             elif self.scroll_start > old_scroll_start:
-                parts.append(f"\033[{self.scroll_start};1H\0337\033[s")
+                parts.append(f"\033[{self.scroll_start};1H\0337")
             else:
-                parts.append("\033[u\0338\0337\033[s")
+                parts.append("\0338\0337")
 
             for idx, line in enumerate(visible_rows):
                 row_num = self.status_start + idx
@@ -398,7 +441,7 @@ class SplitViewportManager:
             ):
                 parts.append(f"\033[{row_num};1H\033[2K\033[K")
 
-            parts.append("\033[u\0338\033[?25h")
+            parts.append("\0338\033[?7h\033[?25h")
 
             self.stream.write("".join(parts))
             self.stream.flush()

@@ -687,10 +687,13 @@ def test_queue_progress_reporter_window_title_updates():
     )
 
     val = stream.getvalue()
-    assert "\033]0;[3/4] (0%) LBS: neo-debug (sync)\007" in val
+    assert (
+        "\033]0;[3/4] (0%) Local Builds Scheduler: neo-debug (sync)\007"
+        in val
+    )
 
     reporter.finish(True)
-    assert "\033]0;LBS: Session SUCCESS\007" in stream.getvalue()
+    assert "\033]0;Local Builds Scheduler: Session SUCCESS\007" in stream.getvalue()
 
 
 def test_queue_progress_reporter_non_tty_degradation():
@@ -896,7 +899,7 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
     assert "\033[?25h" in val
 
     # Contains expected structured btop dashboard sections
-    assert "LBS / BUILD MONITOR" in plain
+    assert "LOCAL BUILDS SCHEDULER" in plain
     assert "PASSED" in plain
     assert "FAILED" in plain
     assert "REMAINING" in plain
@@ -906,6 +909,31 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
     assert "python3 build.py --shared --debug" in plain
     assert "logs/build-app.log" in plain
     assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_queue_progress_reporter_reserves_last_terminal_column():
+    """Dashboard rows avoid the final column so repaint writes cannot auto-wrap."""
+    import io
+    import re
+    import time
+    from lbs.runner import _QueueProgressReporter
+    from rich.cells import cell_len
+
+    reporter = _QueueProgressReporter(
+        total_jobs=2,
+        total_commands=4,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+    )
+
+    rows = reporter._render_dashboard_rows(100, 30)
+
+    assert rows
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    assert all(cell_len(ansi.sub("", row)) <= 99 for row in rows)
 
 
 def test_queue_progress_reporter_split_screen_disabled_in_quiet_and_non_tty():
@@ -1287,8 +1315,8 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         erase_seq = f"\033[{r};1H\033[2K"
         assert erase_seq in out_shrink
         assert out_shrink.index(erase_seq) < shrink_region_idx
-    assert "\033[20;1H\0337\033[s" in out_shrink
-    assert out_shrink.endswith("\033[u\0338\033[?25h")
+    assert "\033[20;1H\0337" in out_shrink
+    assert out_shrink.endswith("\0338\033[?7h\033[?25h")
 
     # Nothing may be drawn or addressed beyond row 20 (the shrunk terminal height)
     addressed_rows = [int(m) for m in re.findall(r"\x1b\[(\d+);1H", out_shrink)]
@@ -1300,6 +1328,7 @@ def test_split_screen_dashboard_resize_erases_old_rows():
     stream.truncate(0)
     with patch("shutil.get_terminal_size", return_value=os.terminal_size((110, 36))):
         reporter.render_split_dashboard()
+        reporter.render_split_dashboard()
 
     out_grow = stream.getvalue()
     assert reporter.status_lines_count == 15
@@ -1310,7 +1339,7 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         erase_seq = f"\033[{r};1H\033[2K"
         assert erase_seq in out_grow
         assert out_grow.index(erase_seq) < grow_region_idx
-    assert out_grow.endswith("\033[u\0338\033[?25h")
+    assert out_grow.endswith("\0338\033[?7h\033[?25h")
 
     reporter.disable_split_screen()
 
@@ -1524,7 +1553,7 @@ def test_scheduler_btop_dashboard_keeps_log_files_free_of_ansi_and_borders(tmp_p
     plain_out = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", captured.out)
 
     # Dashboard rendered with live Siso progress and compiler output preserved
-    assert "LBS / BUILD MONITOR" in plain_out
+    assert "LOCAL BUILDS SCHEDULER" in plain_out
     assert "LIVE COMPILER OUTPUT" in plain_out
     assert "100.0%" in plain_out
     assert "20 / 20" in plain_out
@@ -1541,7 +1570,7 @@ def test_scheduler_btop_dashboard_keeps_log_files_free_of_ansi_and_borders(tmp_p
         assert "\x1b" not in log_text
         assert "╭" not in log_text
         assert "╰" not in log_text
-        assert "LBS / BUILD MONITOR" not in log_text
+        assert "LOCAL BUILDS SCHEDULER" not in log_text
 
     assert "[10/20] 0m01.10s F CXX obj/a.obj" in job_log_text
     assert "[20/20] 0m02.20s F LINK chrome.exe" in job_log_text

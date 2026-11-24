@@ -1417,7 +1417,7 @@ class _QueueProgressReporter:
         scheduled_tasks: list[CommandTask] | None = None,
         enable_ticker: bool = True,
         tick_interval: float = 1.0,
-        progress_redraw_interval: float = 0.20,
+        progress_redraw_interval: float = 0.50,
     ) -> None:
         self.total_jobs = max(1, total_jobs)
         self.total_commands = max(0, total_commands)
@@ -1565,23 +1565,33 @@ class _QueueProgressReporter:
             max_retries=self.current_max_retries,
         )
 
+    def _render_dashboard_rows(self, term_cols: int, term_lines: int) -> list[str]:
+        """Renders without using the terminal's final column.
+
+        Writing in the final column can leave a pending automatic wrap on
+        Windows/VS Code terminals, causing the next dashboard frame to appear
+        below the pinned viewport instead of replacing its existing rows.
+        """
+        dashboard_width = max(1, term_cols - 1)
+        return self.renderer.render(
+            self._build_snapshot(),
+            width=dashboard_width,
+            height=term_lines,
+            profile=self.capabilities,
+        )
+
     def enable_split_screen(self) -> None:
         with self.lock:
             if not self.capabilities.supports_split_screen or self.is_quiet or self.split_active:
                 return
-            term_cols, term_lines = self.viewport.get_terminal_size()
+            term_cols, term_lines = self.viewport.get_stable_terminal_size()
             if term_lines < self.viewport.min_terminal_lines:
                 return
 
-            initial_rows = self.renderer.render(
-                self._build_snapshot(),
-                width=term_cols,
-                height=term_lines,
-                profile=self.capabilities,
-            )
+            initial_rows = self._render_dashboard_rows(term_cols, term_lines)
             if not self.viewport.enable(initial_height=len(initial_rows)):
                 return
-            self.viewport.paint(initial_rows)
+            self.viewport.paint(initial_rows, terminal_size=(term_cols, term_lines))
             self._start_ticker()
 
     def disable_split_screen(self) -> None:
@@ -1692,14 +1702,9 @@ class _QueueProgressReporter:
             if not self.split_active or not self.is_tty or self.is_quiet:
                 return
 
-            term_cols, term_lines = self.viewport.get_terminal_size()
-            rows = self.renderer.render(
-                self._build_snapshot(),
-                width=term_cols,
-                height=term_lines,
-                profile=self.capabilities,
-            )
-            self.viewport.paint(rows)
+            term_cols, term_lines = self.viewport.get_stable_terminal_size()
+            rows = self._render_dashboard_rows(term_cols, term_lines)
+            self.viewport.paint(rows, terminal_size=(term_cols, term_lines))
 
     def on_compiler_output_line(self, line: str) -> None:
         """Consumes a sanitized compiler output chunk to update active build progress."""
@@ -1780,7 +1785,11 @@ class _QueueProgressReporter:
             )
 
             phase_part = f" ({phase_name})" if phase_name and phase_name != "default" else ""
-            title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {job.name}{phase_part}"
+            title = (
+                f"[{self.current_job_idx}/{self.total_jobs}] "
+                f"({self._get_progress_percent()}%) Local Builds Scheduler: "
+                f"{job.name}{phase_part}"
+            )
             self.update_window_title(title)
 
             if not self.is_quiet:
@@ -1851,7 +1860,11 @@ class _QueueProgressReporter:
                 self.current_build_progress = None
 
             phase_part = f" ({self.current_phase_name})" if self.current_phase_name and self.current_phase_name != "default" else ""
-            title = f"[{self.current_job_idx}/{self.total_jobs}] ({self._get_progress_percent()}%) LBS: {self.current_job_name}{phase_part}"
+            title = (
+                f"[{self.current_job_idx}/{self.total_jobs}] "
+                f"({self._get_progress_percent()}%) Local Builds Scheduler: "
+                f"{self.current_job_name}{phase_part}"
+            )
             self.update_window_title(title)
 
             if self.is_quiet:
@@ -1902,7 +1915,7 @@ class _QueueProgressReporter:
             self.clear_quiet_bar()
             self.viewport.disable()
             status_str = "SUCCESS" if session_success else "FAILED"
-            self.update_window_title(f"LBS: Session {status_str}")
+            self.update_window_title(f"Local Builds Scheduler: Session {status_str}")
 
     def finish_interrupted(self) -> None:
         self._stop_ticker()
@@ -1910,7 +1923,7 @@ class _QueueProgressReporter:
             self.execution_status = ExecutionStatus.INTERRUPTED
             self.clear_quiet_bar()
             self.viewport.disable()
-            self.update_window_title("LBS: Session CANCELLED (Ctrl+C)")
+            self.update_window_title("Local Builds Scheduler: Session CANCELLED (Ctrl+C)")
 
 
 def _init_job_states(

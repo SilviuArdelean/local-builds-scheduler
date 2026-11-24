@@ -7,6 +7,7 @@ Unit tests for Phase 3: lbs.ui.dashboard responsive Rich renderer.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 
 import pytest
@@ -107,7 +108,7 @@ def test_full_layout_contains_all_btop_sections_and_truecolor_palette():
     assert "█" in plain and "░" in plain
 
     # Section 1: Build monitor
-    assert "LBS / BUILD MONITOR" in plain
+    assert "LOCAL BUILDS SCHEDULER" in plain
     assert "● RUNNING" in plain
     assert "Queue progress" in plain
     assert "50.0%" in plain
@@ -169,6 +170,16 @@ def test_unavailable_build_progress_does_not_fabricate_percentage():
     assert "Step 2 of 4" in plain
     assert "68.5%" not in plain
     assert "● SYNC" in plain
+
+
+def test_stats_values_render_inline_with_double_space_separator():
+    """Multiline stats values should be flattened inline with two-space separators."""
+    renderer = DashboardRenderer()
+    snap = replace(_sample_snapshot(), failed_jobs="✗ 0\n✗ 1")
+    lines = renderer.render(snap, width=120, height=34)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "✗ 0  ✗ 1" in plain
 
 
 def test_long_command_and_log_path_wrap_without_truncation():
@@ -235,7 +246,7 @@ def test_no_ansi_and_ascii_fallback_are_strictly_plain_ascii():
     assert "\x1b" not in output
     output.encode("ascii")  # Must not raise UnicodeEncodeError
     assert "+" in output and "-" in output and "|" in output
-    assert "LBS / BUILD MONITOR" in output
+    assert "LOCAL BUILDS SCHEDULER" in output
     assert "* RUNNING" in output
     assert "+ 1" in output
     assert "x 0" in output
