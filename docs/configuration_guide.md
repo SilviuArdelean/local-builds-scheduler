@@ -142,6 +142,13 @@ settings:
   log_dir: "./logs"             # Default: "logs"
   stop_on_failure: true         # Default: false
   quiet: false                  # Default: false (live output is streamed to console by default)
+  system_resources:             # Default: enabled with standard intervals
+    enabled: true
+    cpu_interval_seconds: 1
+    memory_interval_seconds: 30
+    disk_io_interval_seconds: 3
+    disk_free_interval_seconds: 300
+    disk_io_enabled: true
   notifications:                # Default: empty (disabled)
     on_success: true
     on_failure: true
@@ -154,6 +161,7 @@ settings:
 | `stop_on_failure` | `boolean` | `false` | When `true`, any job or phase failure halts the scheduler immediately, marking unexecuted jobs as `ABORTED` (or `PARTIAL` if earlier phases completed). When `false`, LBS logs the failure and continues executing subsequent jobs. |
 | `quiet` | `boolean` | `false` | When `true`, suppresses live streaming of command output to the terminal (silent mode) while continuing to capture full logs in the job log files and printing the final summary table. Can also be enabled via CLI flag `-q` / `--quiet`. |
 | `verbose` | `boolean` | `true` | (*Legacy / Alternate*) Live output streaming is enabled by default (`true`). Setting `verbose: false` is equivalent to `quiet: true`. If `quiet: true` is set, it takes precedence. |
+| `system_resources` | `object` | defaults enabled | Optional dashboard system resource monitoring settings. `enabled` and `disk_io_enabled` must be booleans. Interval fields (`cpu_interval_seconds`, `memory_interval_seconds`, `disk_io_interval_seconds`, `disk_free_interval_seconds`) must be positive finite numbers. |
 | `notifications` | `object` | `None` | Notification triggers and endpoint configurations. |
 
 ---

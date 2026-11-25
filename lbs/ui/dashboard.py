@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from lbs.monitoring import format_bytes_iec, format_bytes_rate_iec
 from lbs.ui.state import (
     DashboardSnapshot,
     format_compact_duration,
@@ -351,14 +352,140 @@ class DashboardRenderer:
             padding=(0, h_pad),
         )
 
-    def _build_stats_row(
+    def _build_system_resources_panel(
         self,
         snapshot: DashboardSnapshot,
-        width: int,
+        panel_width: int,
         glyphs: GlyphSet,
         use_color: bool,
-    ) -> Table:
-        short_labels = width < 68
+        compact_padding: bool = False,
+    ) -> Panel:
+        overflow_mode: Literal["ellipsis", "crop"] = (
+            "ellipsis" if glyphs.rule_char != "-" else "crop"
+        )
+        h_pad = 1 if compact_padding else 2
+        inner_width = max(24, panel_width - 2 - (h_pad * 2))
+        col_width = max(6, (inner_width - 6) // 4)
+        bar_width = max(4, min(14, col_width - 1))
+
+        resources = snapshot.system_resources
+
+        cpu = resources.cpu
+        memory = resources.memory
+        disk_io = resources.disk_io
+        disk_free = resources.disk_free
+
+        cpu_value = (
+            f"{cpu.value:.0f}%"
+            if cpu.available
+            else "N/A"
+        )
+        if memory.available:
+            memory_value = (
+                f"{format_bytes_iec(memory.used_bytes, decimals=0)} / "
+                f"{format_bytes_iec(memory.total_bytes, decimals=0)}"
+            )
+        else:
+            memory_value = "N/A"
+        disk_io_value = (
+            f"R: {format_bytes_rate_iec(disk_io.read_bytes_per_second)}"
+            f"  W: {format_bytes_rate_iec(disk_io.write_bytes_per_second)}"
+            if disk_io.available
+            else "N/A"
+        )
+        if disk_free.available:
+            disk_free_value = (
+                f"{format_bytes_iec(disk_free.free_bytes, decimals=0)} / "
+                f"{format_bytes_iec(disk_free.total_bytes, decimals=0)}"
+            )
+        else:
+            disk_free_value = "N/A"
+
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in range(4):
+            grid.add_column(ratio=1, no_wrap=True)
+
+        grid.add_row(
+            Text("CPU", style=_style(GRAY, use_color)),
+            Text("RAM", style=_style(GRAY, use_color)),
+            Text("DISK I/O", style=_style(GRAY, use_color)),
+            Text("DISK FREE", style=_style(GRAY, use_color)),
+        )
+        grid.add_row(
+            Text(
+                cpu_value,
+                style=_style(f"bold {GREEN}" if cpu.available else GRAY, use_color),
+                overflow=overflow_mode,
+                no_wrap=True,
+            ),
+            Text(
+                memory_value,
+                style=_style(f"bold {CYAN}" if memory.available else GRAY, use_color),
+                overflow=overflow_mode,
+                no_wrap=True,
+            ),
+            Text(
+                disk_io_value,
+                style=_style(f"bold {YELLOW}" if disk_io.available else GRAY, use_color),
+                overflow=overflow_mode,
+                no_wrap=True,
+            ),
+            Text(
+                disk_free_value,
+                style=_style(f"bold {GREEN}" if disk_free.available else GRAY, use_color),
+                overflow=overflow_mode,
+                no_wrap=True,
+            ),
+        )
+        grid.add_row(
+            _make_bar(
+                cpu.value,
+                bar_width,
+                GREEN,
+                glyphs,
+                use_color,
+                available=cpu.available,
+            ),
+            _make_bar(
+                memory.used_percent,
+                bar_width,
+                CYAN,
+                glyphs,
+                use_color,
+                available=memory.available,
+            ),
+            Text(""),
+            _make_bar(
+                disk_free.used_percent,
+                bar_width,
+                GREEN,
+                glyphs,
+                use_color,
+                available=disk_free.available,
+            ),
+        )
+
+        return Panel(
+            grid,
+            title=Text("SYSTEM RESOURCES", style=_style(GRAY, use_color)),
+            title_align="left",
+            box=glyphs.box_style,
+            border_style=_style(DARK_GRAY, use_color),
+            padding=(0, h_pad),
+        )
+
+    def _build_jobs_panel(
+        self,
+        snapshot: DashboardSnapshot,
+        panel_width: int,
+        glyphs: GlyphSet,
+        use_color: bool,
+        compact_padding: bool = False,
+    ) -> Panel:
+        overflow_mode: Literal["ellipsis", "crop"] = (
+            "ellipsis" if glyphs.rule_char != "-" else "crop"
+        )
+        short_labels = panel_width < 34
         specs = [
             (
                 "PASS" if short_labels else "PASSED",
@@ -373,15 +500,21 @@ class DashboardRenderer:
                 RED,
             ),
             (
-                "REM" if short_labels else "REMAINING",
+                "LEFT" if short_labels else "REMAINING",
                 glyphs.remaining,
                 snapshot.remaining_jobs,
                 YELLOW,
             ),
         ]
 
-        panels: list[Panel] = []
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in range(3):
+            grid.add_column(ratio=1, no_wrap=True)
+
+        label_row: list[Text] = []
+        value_row: list[Text] = []
         for label, icon, count, color in specs:
+            label_row.append(Text(label, style=_style(GRAY, use_color)))
             inline_items = _iter_inline_items(count)
             formatted_values: list[str] = []
             for item in inline_items:
@@ -390,27 +523,60 @@ class DashboardRenderer:
                 else:
                     formatted_values.append(f"{icon} {item}")
             formatted_count = "  ".join(formatted_values) if formatted_values else f"{icon} 0"
-            body = Text(overflow="fold")
-            value = formatted_count.rstrip()
-            body.append(value, style=_style(f"bold {color}", use_color))
-            panels.append(
-                Panel(
-                    body,
-                    title=Text(label, style=_style(GRAY, use_color)),
-                    title_align="left",
-                    box=glyphs.box_style,
-                    border_style=_style(color, use_color),
-                    padding=(0, 1),
+            value_row.append(
+                Text(
+                    formatted_count.rstrip(),
+                    style=_style(f"bold {color}", use_color),
+                    overflow=overflow_mode,
+                    no_wrap=True,
                 )
             )
+        grid.add_row(*label_row)
+        grid.add_row(*value_row)
+        grid.add_row(Text(""), Text(""), Text(""))
+
+        h_pad = 1 if compact_padding else 2
+        return Panel(
+            grid,
+            title=Text("JOBS", style=_style(GRAY, use_color)),
+            title_align="left",
+            box=glyphs.box_style,
+            border_style=_style(DARK_GRAY, use_color),
+            padding=(0, h_pad),
+        )
+
+    def _build_resources_and_jobs_row(
+        self,
+        snapshot: DashboardSnapshot,
+        width: int,
+        glyphs: GlyphSet,
+        use_color: bool,
+        compact_padding: bool,
+    ) -> Table:
+        right_width = max(24, int(width * 0.28))
+        right_width = min(right_width, max(24, width - 24))
+        left_width = max(24, width - right_width - 1)
+
+        resources_panel = self._build_system_resources_panel(
+            snapshot=snapshot,
+            panel_width=left_width,
+            glyphs=glyphs,
+            use_color=use_color,
+            compact_padding=compact_padding,
+        )
+        jobs_panel = self._build_jobs_panel(
+            snapshot=snapshot,
+            panel_width=right_width,
+            glyphs=glyphs,
+            use_color=use_color,
+            compact_padding=compact_padding,
+        )
 
         row = Table.grid(expand=True, padding=(0, 0))
-        row.add_column(ratio=1)
+        row.add_column(width=left_width)
         row.add_column(width=1)
-        row.add_column(ratio=1)
-        row.add_column(width=1)
-        row.add_column(ratio=1)
-        row.add_row(panels[0], "", panels[1], "", panels[2])
+        row.add_column(width=right_width)
+        row.add_row(resources_panel, "", jobs_panel)
         return row
 
     def _build_active_target_panel(
@@ -479,11 +645,12 @@ class DashboardRenderer:
             use_color=use_color,
             compact_padding=compact_padding,
         )
-        stats = self._build_stats_row(
+        resources_jobs = self._build_resources_and_jobs_row(
             snapshot=snapshot,
             width=width,
             glyphs=glyphs,
             use_color=use_color,
+            compact_padding=compact_padding,
         )
         active = self._build_active_target_panel(
             snapshot=snapshot,
@@ -493,7 +660,7 @@ class DashboardRenderer:
             compact_padding=compact_padding,
         )
         sep = _make_output_separator(width=width, glyphs=glyphs, use_color=use_color)
-        return Group(monitor, stats, active, sep)
+        return Group(monitor, resources_jobs, active, sep)
 
     def _build_compact(
         self,
@@ -576,7 +743,14 @@ class DashboardRenderer:
             style=_style(f"bold {st_color}", use_color),
         )
 
-        # Row 3-4: Wrapped CMD & LOG
+        # Row 3: Compact system resources summary (when monitoring has samples)
+        resource_line = self._build_compact_resource_line(
+            snapshot=snapshot,
+            glyphs=glyphs,
+            use_color=use_color,
+        )
+
+        # Row 4-5: Wrapped CMD & LOG
         details = Table.grid(expand=True, padding=(0, 0))
         details.add_column(width=4, no_wrap=True)
         details.add_column(ratio=1)
@@ -588,8 +762,13 @@ class DashboardRenderer:
         details.add_row(Text("CMD ", style=_style(f"bold {GRAY}", use_color)), cmd_val)
         details.add_row(Text("LOG ", style=_style(f"bold {GRAY}", use_color)), log_val)
 
+        render_items: list[RenderableType] = [metrics_line, summary_line]
+        if resource_line is not None:
+            render_items.append(resource_line)
+        render_items.append(details)
+
         panel = Panel(
-            Group(metrics_line, summary_line, details),
+            Group(*render_items),
             title=title,
             title_align="left",
             box=glyphs.box_style,
@@ -631,6 +810,12 @@ class DashboardRenderer:
             f"{glyphs.dot} {snapshot.status_label}",
             style=_style(f"bold {st_color}", use_color),
         )
+        minimal_suffix = self._build_minimal_resource_suffix(snapshot)
+        if minimal_suffix:
+            line1.append(
+                f" {minimal_suffix}",
+                style=_style(GRAY, use_color),
+            )
 
         line2 = Text(no_wrap=True, overflow=overflow_mode)
         line2.append(
@@ -647,6 +832,76 @@ class DashboardRenderer:
 
         sep = _make_output_separator(width=width, glyphs=glyphs, use_color=use_color)
         return Group(line1, line2, sep)
+
+    def _build_compact_resource_line(
+        self,
+        snapshot: DashboardSnapshot,
+        glyphs: GlyphSet,
+        use_color: bool,
+    ) -> Text | None:
+        resources = snapshot.system_resources
+        if not (
+            resources.cpu.available
+            or resources.memory.available
+            or resources.disk_io.available
+            or resources.disk_free.available
+        ):
+            return None
+
+        overflow_mode: Literal["ellipsis", "crop"] = (
+            "ellipsis" if glyphs.rule_char != "-" else "crop"
+        )
+        line = Text(overflow=overflow_mode, no_wrap=True)
+
+        cpu_value = f"{resources.cpu.value:.0f}%" if resources.cpu.available else "N/A"
+        memory_value = (
+            f"{resources.memory.used_percent:.0f}%"
+            if resources.memory.available
+            else "N/A"
+        )
+        io_value = (
+            f"R: {format_bytes_rate_iec(resources.disk_io.read_bytes_per_second)}"
+            f"  W: {format_bytes_rate_iec(resources.disk_io.write_bytes_per_second)}"
+            if resources.disk_io.available
+            else "N/A"
+        )
+        free_value = (
+            format_bytes_iec(resources.disk_free.free_bytes, decimals=0)
+            if resources.disk_free.available
+            else "N/A"
+        )
+
+        line.append("RES ", style=_style(GRAY, use_color))
+        line.append("CPU ", style=_style(GRAY, use_color))
+        line.append(
+            cpu_value,
+            style=_style(f"bold {GREEN}" if resources.cpu.available else GRAY, use_color),
+        )
+        line.append("  RAM ", style=_style(GRAY, use_color))
+        line.append(
+            memory_value,
+            style=_style(f"bold {CYAN}" if resources.memory.available else GRAY, use_color),
+        )
+        line.append("  IO ", style=_style(GRAY, use_color))
+        line.append(
+            io_value,
+            style=_style(f"bold {YELLOW}" if resources.disk_io.available else GRAY, use_color),
+        )
+        line.append("  FREE ", style=_style(GRAY, use_color))
+        line.append(
+            free_value,
+            style=_style(f"bold {GREEN}" if resources.disk_free.available else GRAY, use_color),
+        )
+        return line
+
+    def _build_minimal_resource_suffix(self, snapshot: DashboardSnapshot) -> str:
+        resources = snapshot.system_resources
+        if not (resources.cpu.available or resources.memory.available):
+            return ""
+
+        cpu = f"{resources.cpu.value:.0f}" if resources.cpu.available else "-"
+        ram = f"{resources.memory.used_percent:.0f}" if resources.memory.available else "-"
+        return f"R:{cpu}/{ram}"
 
     def _render_to_lines(
         self,

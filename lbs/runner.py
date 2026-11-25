@@ -23,6 +23,14 @@ import threading
 import time
 
 from lbs.config import Config, Job, BuildStatus, resolve_status_path, load_config
+from lbs.monitoring import SystemResourcesMonitor
+from lbs.monitoring.models import (
+    DiskFreeSample,
+    DiskIoSample,
+    MemorySample,
+    PercentSample,
+    SystemResourcesSnapshot,
+)
 from lbs.ui import (
     BuildProgress,
     BuildProgressParser,
@@ -1436,6 +1444,8 @@ class _QueueProgressReporter:
         enable_ticker: bool = True,
         tick_interval: float = 1.0,
         progress_redraw_interval: float = 0.50,
+        resource_config=None,
+        resource_monitor: SystemResourcesMonitor | None = None,
     ) -> None:
         self.total_jobs = max(1, total_jobs)
         self.total_commands = max(0, total_commands)
@@ -1485,6 +1495,19 @@ class _QueueProgressReporter:
         self._last_progress_render_time = 0.0
         self._ticker_stop = threading.Event()
         self._ticker_thread: threading.Thread | None = None
+        self._resource_snapshot = SystemResourcesSnapshot()
+
+        self._resource_monitor: SystemResourcesMonitor | None = resource_monitor
+        config = resource_config
+        if self._resource_monitor is None and config is not None and getattr(config, "enabled", False):
+            self._resource_monitor = SystemResourcesMonitor(
+                enabled=config.enabled,
+                disk_io_enabled=config.disk_io_enabled,
+                cpu_interval_seconds=config.cpu_interval_seconds,
+                memory_interval_seconds=config.memory_interval_seconds,
+                disk_io_interval_seconds=config.disk_io_interval_seconds,
+                disk_free_interval_seconds=config.disk_free_interval_seconds,
+            )
 
         if self.capabilities.supports_split_screen and not self.is_quiet:
             try:
@@ -1547,6 +1570,7 @@ class _QueueProgressReporter:
                     if self._ticker_stop.is_set():
                         break
                     if self.split_active and not self.is_quiet:
+                        self._poll_resource_monitor()
                         self.render_split_dashboard()
                     elif self.is_quiet and self.is_tty and self.active_bar_active:
                         self.render_quiet_bar()
@@ -1577,6 +1601,7 @@ class _QueueProgressReporter:
             status=self.execution_status,
             retry_attempt=self.current_retry_attempt,
             max_retries=self.current_max_retries,
+            system_resources=self._resource_snapshot,
         )
 
     def _render_dashboard_rows(self, term_cols: int, term_lines: int) -> list[str]:
@@ -1602,6 +1627,7 @@ class _QueueProgressReporter:
             if term_lines < self.viewport.min_terminal_lines:
                 return
 
+            self._poll_resource_monitor()
             initial_rows = self._render_dashboard_rows(term_cols, term_lines)
             if not self.viewport.enable(initial_height=len(initial_rows)):
                 return
@@ -1612,6 +1638,47 @@ class _QueueProgressReporter:
         self._stop_ticker()
         with self.lock:
             self.viewport.disable()
+            self._close_resource_monitor()
+
+    def _close_resource_monitor(self) -> None:
+        if self._resource_monitor is None:
+            return
+        try:
+            self._resource_monitor.close()
+        finally:
+            self._resource_monitor = None
+            self._resource_snapshot = SystemResourcesSnapshot()
+
+    def _poll_resource_monitor(self) -> None:
+        if self._resource_monitor is None:
+            return
+        try:
+            self._resource_snapshot = self._resource_monitor.poll()
+        except (AttributeError, TypeError, ValueError, OSError, RuntimeError) as exc:
+            error = str(exc).strip() or exc.__class__.__name__
+            sampled_at = time.perf_counter()
+            self._resource_snapshot = SystemResourcesSnapshot(
+                cpu=PercentSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                memory=MemorySample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                disk_io=DiskIoSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                disk_free=DiskFreeSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+            )
 
     def _get_elapsed_str(self) -> str:
         elapsed = int(max(0.0, time.perf_counter() - self.session_start_time))
@@ -1788,6 +1855,11 @@ class _QueueProgressReporter:
             self.current_retry_attempt = attempt
             self.current_max_retries = job.retries
             self.active_phase_start_time = time.perf_counter()
+            if self._resource_monitor is not None:
+                try:
+                    self._resource_monitor.set_workspace(Path(job.cwd))
+                except (TypeError, ValueError, OSError, RuntimeError):
+                    pass
             self.progress_parser.reset()
             self.current_build_progress = None
             self.execution_status = (
@@ -1924,6 +1996,7 @@ class _QueueProgressReporter:
             )
             self.clear_quiet_bar()
             self.viewport.disable()
+            self._close_resource_monitor()
             status_str = "SUCCESS" if session_success else "FAILED"
             self.update_window_title(f"Local Builds Scheduler: Session {status_str}")
 
@@ -1933,6 +2006,7 @@ class _QueueProgressReporter:
             self.execution_status = ExecutionStatus.INTERRUPTED
             self.clear_quiet_bar()
             self.viewport.disable()
+            self._close_resource_monitor()
             self.update_window_title("Local Builds Scheduler: Session CANCELLED (Ctrl+C)")
 
 
@@ -2445,6 +2519,7 @@ class Scheduler:
                 session_start_time=session_start_time,
                 is_quiet=getattr(config.settings, "quiet", False) or not verbose_mode,
                 scheduled_tasks=scheduled_tasks,
+                resource_config=getattr(config.settings, "system_resources", None),
             )
             progress_reporter.enable_split_screen()
 

@@ -12,7 +12,16 @@ import re
 
 import pytest
 from rich.cells import cell_len
+from rich.console import Console
 
+from lbs.monitoring import (
+    DiskFreeSample,
+    DiskIoSample,
+    MemorySample,
+    PercentSample,
+    SystemResourcesSnapshot,
+)
+from lbs.ui.theme import get_glyphs
 from lbs.ui import (
     BuildProgress,
     DashboardRenderer,
@@ -60,6 +69,29 @@ def _sample_snapshot(
         cmd_idx=cmd_idx,
         phase_cmd_total=phase_cmd_total,
         status=status,
+        system_resources=SystemResourcesSnapshot(
+            cpu=PercentSample(available=True, value=84.0, sampled_at=1.0),
+            memory=MemorySample(
+                available=True,
+                used_bytes=61 * 1024**3,
+                total_bytes=128 * 1024**3,
+                used_percent=47.7,
+                sampled_at=1.0,
+            ),
+            disk_io=DiskIoSample(
+                available=True,
+                read_bytes_per_second=25.2 * 1024**2,
+                write_bytes_per_second=8.4 * 1024**2,
+                sampled_at=1.0,
+            ),
+            disk_free=DiskFreeSample(
+                available=True,
+                volume="D:\\",
+                free_bytes=420 * 1024**3,
+                total_bytes=1024**4,
+                sampled_at=1.0,
+            ),
+        ),
     )
 
 
@@ -94,7 +126,7 @@ def test_full_layout_contains_all_btop_sections_and_truecolor_palette():
         profile=RenderProfile(use_ansi=True, color_system="truecolor", use_unicode=True),
     )
 
-    assert len(lines) == 15
+    assert len(lines) == 17
     plain_lines = [_strip_ansi(line) for line in lines]
     plain = "\n".join(plain_lines)
     raw = "\n".join(lines)
@@ -120,13 +152,25 @@ def test_full_layout_contains_all_btop_sections_and_truecolor_palette():
     assert "00:43:16" in plain
     assert "Build: 25m 43s" in plain
 
-    # Section 2: Dedicated horizontal stats panels (all on the same row)
-    stats_border_row = next(line for line in plain_lines if "PASSED" in line)
-    assert "FAILED" in stats_border_row
-    assert "REMAINING" in stats_border_row
-    stats_value_row = next(line for line in plain_lines if "✓ 1" in line)
-    assert "✗ 0" in stats_value_row
-    assert "◉ 1" in stats_value_row
+    # Section 2: Split SYSTEM RESOURCES + JOBS row
+    assert "SYSTEM RESOURCES" in plain
+    assert "JOBS" in plain
+    assert "CPU" in plain
+    assert "RAM" in plain
+    assert "DISK I/O" in plain
+    assert "DISK FREE" in plain
+    assert "84%" in plain
+    assert "61 GiB" in plain
+    assert "25.2 MiB/s" in plain
+    assert "R:" in plain
+    assert "420 GiB" in plain
+
+    jobs_border_row = next(line for line in plain_lines if ("PASS" in line or "PASSED" in line))
+    assert "FAIL" in jobs_border_row or "FAILED" in jobs_border_row
+    assert "LEFT" in jobs_border_row or "REMAINING" in jobs_border_row
+    jobs_value_row = next(line for line in plain_lines if "✓ 1" in line)
+    assert "✗ 0" in jobs_value_row
+    assert "◉ 1" in jobs_value_row
 
     # Section 3: Active target panel
     assert "ACTIVE TARGET" in plain
@@ -172,6 +216,16 @@ def test_unavailable_build_progress_does_not_fabricate_percentage():
     assert "● SYNC" in plain
 
 
+def test_full_layout_disk_io_uses_read_write_separator_when_space_allows():
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=140, height=34)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "R:" in plain
+    assert "  W:" in plain
+
+
 def test_stats_values_render_inline_with_double_space_separator():
     """Multiline stats values should be flattened inline with two-space separators."""
     renderer = DashboardRenderer()
@@ -180,6 +234,91 @@ def test_stats_values_render_inline_with_double_space_separator():
     plain = "\n".join(_strip_ansi(line) for line in lines)
 
     assert "✗ 0  ✗ 1" in plain
+
+
+def test_full_layout_resources_show_na_when_unavailable():
+    """Unavailable resource values should render as N/A in full layout."""
+    renderer = DashboardRenderer()
+    snap = replace(
+        _sample_snapshot(),
+        system_resources=SystemResourcesSnapshot(),
+    )
+    lines = renderer.render(snap, width=100, height=34)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "SYSTEM RESOURCES" in plain
+    assert "CPU" in plain and "RAM" in plain and "DISK I/O" in plain and "DISK FREE" in plain
+    assert plain.count("N/A") >= 4
+
+
+def test_compact_layout_includes_resource_summary_when_available():
+    """Compact tier should show resource summary when any sample is available."""
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=70, height=21)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "RES CPU" in plain
+    assert "RAM" in plain
+    assert "IO" in plain
+    assert "R: 25.2 MiB/s  W: 8.4 MiB/s" in plain
+    assert "/s/" not in plain
+    assert "FREE" in plain
+    assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_compact_layout_omits_resource_summary_when_unavailable():
+    """Compact tier should omit resource line when no resource sample is available."""
+    renderer = DashboardRenderer()
+    snap = replace(_sample_snapshot(), system_resources=SystemResourcesSnapshot())
+    lines = renderer.render(snap, width=70, height=21)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "RES CPU" not in plain
+    assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_compact_layout_unavailable_values_render_gray_not_metric_color():
+    renderer = DashboardRenderer()
+    snap = replace(
+        _sample_snapshot(),
+        system_resources=SystemResourcesSnapshot(
+            disk_free=DiskFreeSample(
+                available=True,
+                volume="D:\\",
+                free_bytes=420 * 1024**3,
+                total_bytes=1024**4,
+                sampled_at=1.0,
+            ),
+        ),
+    )
+
+    line = renderer._build_compact_resource_line(
+        snapshot=snap,
+        glyphs=get_glyphs(use_unicode=True),
+        use_color=True,
+    )
+    assert line is not None
+
+    console = Console()
+    na_positions = [match.start() for match in re.finditer("N/A", line.plain)]
+    assert len(na_positions) == 3
+
+    for position in na_positions:
+        style = line.get_style_at_offset(console, position)
+        assert style.bold is not True
+        assert style.color is not None
+        assert style.color.triplet == (137, 153, 168)
+
+
+def test_minimal_layout_adds_constrained_resource_suffix():
+    """Minimal tier should append short R:cpu/ram suffix when resources are available."""
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=80, height=12)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "R:84/48" in plain
 
 
 def test_long_command_and_log_path_wrap_without_truncation():
