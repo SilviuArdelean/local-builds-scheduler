@@ -1513,6 +1513,199 @@ def test_queue_progress_reporter_ticker_starts_updates_and_stops_cleanly():
     assert ticker_ref is not None and not ticker_ref.is_alive()
 
 
+def test_queue_progress_reporter_start_phase_updates_resource_workspace():
+    """Reporter should propagate active job cwd to the resource monitor."""
+    import io
+    from lbs.runner import _QueueProgressReporter, CommandTask
+
+    class _FakeResourceMonitor:
+        def __init__(self):
+            self.workspaces = []
+
+        def set_workspace(self, workspace):
+            self.workspaces.append(Path(workspace))
+
+        def poll(self):
+            from lbs.monitoring.models import SystemResourcesSnapshot
+            return SystemResourcesSnapshot()
+
+        def close(self):
+            pass
+
+    monitor = _FakeResourceMonitor()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=monitor,
+    )
+    reporter.start_phase(
+        job=Job(name="resource-job", cwd=r"D:\sources\workspace"),
+        phase_name="build",
+        cmds_to_run_tasks=[CommandTask(index=0, phase="build", command="echo 1")],
+        log_path="logs/resource.log",
+        job_idx=1,
+    )
+    assert monitor.workspaces == [Path(r"D:\sources\workspace")]
+
+
+def test_queue_progress_reporter_ticker_polls_resource_monitor_for_split_dashboard():
+    """Ticker should poll monitor while split-screen dashboard refresh is active."""
+    import io
+    import time
+    from lbs.runner import _QueueProgressReporter
+
+    class _FakeResourceMonitor:
+        def __init__(self):
+            self.poll_calls = 0
+
+        def poll(self):
+            self.poll_calls += 1
+            from lbs.monitoring.models import SystemResourcesSnapshot
+            return SystemResourcesSnapshot()
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            return None
+
+    monitor = _FakeResourceMonitor()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        tick_interval=0.02,
+        resource_monitor=monitor,
+    )
+    reporter.viewport.active = True
+    reporter.render_split_dashboard = lambda: None
+
+    reporter._start_ticker()
+    time.sleep(0.08)
+    reporter._stop_ticker()
+
+    assert monitor.poll_calls > 0
+
+
+def test_queue_progress_reporter_build_snapshot_contains_resource_snapshot():
+    """Dashboard snapshot should carry current resource snapshot from monitor."""
+    import io
+    from lbs.monitoring.models import PercentSample, SystemResourcesSnapshot
+    from lbs.runner import _QueueProgressReporter
+
+    class _FakeResourceMonitor:
+        def poll(self):
+            return SystemResourcesSnapshot(
+                cpu=PercentSample(available=True, value=37.5, sampled_at=1.0)
+            )
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            return None
+
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=_FakeResourceMonitor(),
+    )
+    reporter._poll_resource_monitor()
+    snapshot = reporter._build_snapshot()
+    assert snapshot.system_resources.cpu.available is True
+    assert snapshot.system_resources.cpu.value == 37.5
+
+
+def test_queue_progress_reporter_finish_closes_resource_monitor():
+    """Finishing the reporter should close and clear the resource monitor."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    class _FakeResourceMonitor:
+        def __init__(self):
+            self.closed = 0
+
+        def poll(self):
+            from lbs.monitoring.models import SystemResourcesSnapshot
+            return SystemResourcesSnapshot()
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            self.closed += 1
+
+    monitor = _FakeResourceMonitor()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=100.0,
+        is_quiet=True,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=monitor,
+    )
+
+    reporter.finish(True)
+    assert monitor.closed == 1
+    assert reporter._resource_monitor is None
+
+
+def test_queue_progress_reporter_disabled_ticker_does_not_poll_resource_monitor():
+    """Reporter should not poll monitor when ticker is disabled."""
+    import io
+    import time
+    from lbs.runner import _QueueProgressReporter
+
+    class _FakeResourceMonitor:
+        def __init__(self):
+            self.poll_calls = 0
+
+        def poll(self):
+            self.poll_calls += 1
+            from lbs.monitoring.models import SystemResourcesSnapshot
+            return SystemResourcesSnapshot()
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            return None
+
+    monitor = _FakeResourceMonitor()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=time.perf_counter(),
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=monitor,
+    )
+    reporter.viewport.active = True
+    reporter._start_ticker()
+    time.sleep(0.05)
+    reporter._stop_ticker()
+
+    assert reporter._ticker_thread is None
+    assert monitor.poll_calls == 0
+
+
 def test_scheduler_btop_dashboard_keeps_log_files_free_of_ansi_and_borders(tmp_path, capsys):
     """Phase 5: End-to-end run with simulated Chromium Siso output verifies dashboard renders
     to stdout while session and job log files contain zero ANSI escapes or dashboard borders.
