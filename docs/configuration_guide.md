@@ -144,9 +144,9 @@ settings:
   quiet: false                  # Default: false (live output is streamed to console by default)
   system_resources:             # Default: enabled with standard intervals
     enabled: true
-    cpu_interval_seconds: 5
+    cpu_interval_seconds: 1
     memory_interval_seconds: 30
-    disk_io_interval_seconds: 10
+    disk_io_interval_seconds: 3
     disk_free_interval_seconds: 300
     disk_io_enabled: true
   notifications:                # Default: empty (disabled)

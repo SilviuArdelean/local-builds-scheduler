@@ -66,7 +66,13 @@ def workspace_volume_id(path: Path) -> str:
         if not normalized.endswith("\\"):
             normalized = f"{normalized}\\"
         return normalized.upper()
-    return "/"
+
+    existing = _nearest_existing_path(resolved)
+    target = existing or resolved
+    try:
+        return f"DEV:{int(os.stat(target).st_dev)}"
+    except (AttributeError, OSError, TypeError, ValueError):
+        return str(target.resolve(strict=False))
 
 
 class PsutilCpuCollector:

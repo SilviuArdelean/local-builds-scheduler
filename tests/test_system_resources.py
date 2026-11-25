@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
-from lbs.monitoring.collectors import PsutilDiskIoCollector
+from lbs.monitoring.collectors import PsutilDiskIoCollector, workspace_volume_id
 from lbs.monitoring.monitor import SystemResourcesMonitor
 
 
@@ -80,6 +81,30 @@ def test_disk_io_collector_detects_counter_reset():
     reset = collector.sample(11.0)
     assert reset.available is False
     assert reset.error == "counter reset detected"
+
+
+def test_workspace_volume_id_non_windows_uses_device_id_for_change_detection():
+    class _StatResult:
+        def __init__(self, st_dev: int) -> None:
+            self.st_dev = st_dev
+
+    with (
+        patch("lbs.monitoring.collectors.os.name", "posix"),
+        patch(
+            "lbs.monitoring.collectors._nearest_existing_path",
+            side_effect=[Path("/mnt/a/repo"), Path("/mnt/b/repo")],
+        ),
+        patch(
+            "lbs.monitoring.collectors.os.stat",
+            side_effect=[_StatResult(101), _StatResult(202)],
+        ),
+    ):
+        first = workspace_volume_id(Path("/mnt/a/repo/workspace"))
+        second = workspace_volume_id(Path("/mnt/b/repo/workspace"))
+
+    assert first == "DEV:101"
+    assert second == "DEV:202"
+    assert first != second
 
 
 def test_system_resources_monitor_uses_independent_deadlines():
@@ -335,7 +360,7 @@ def test_system_resources_monitor_warms_up_disk_io_baseline_within_one_second():
 def test_system_resources_monitor_defaults_match_config_defaults():
     monitor = SystemResourcesMonitor()
 
-    assert monitor._cpu_interval == 5.0
+    assert monitor._cpu_interval == 1.0
     assert monitor._memory_interval == 30.0
-    assert monitor._disk_io_interval == 10.0
+    assert monitor._disk_io_interval == 3.0
     assert monitor._disk_free_interval == 300.0

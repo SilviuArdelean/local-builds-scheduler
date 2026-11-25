@@ -12,6 +12,7 @@ import re
 
 import pytest
 from rich.cells import cell_len
+from rich.console import Console
 
 from lbs.monitoring import (
     DiskFreeSample,
@@ -20,6 +21,7 @@ from lbs.monitoring import (
     PercentSample,
     SystemResourcesSnapshot,
 )
+from lbs.ui.theme import get_glyphs
 from lbs.ui import (
     BuildProgress,
     DashboardRenderer,
@@ -274,6 +276,39 @@ def test_compact_layout_omits_resource_summary_when_unavailable():
 
     assert "RES CPU" not in plain
     assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_compact_layout_unavailable_values_render_gray_not_metric_color():
+    renderer = DashboardRenderer()
+    snap = replace(
+        _sample_snapshot(),
+        system_resources=SystemResourcesSnapshot(
+            disk_free=DiskFreeSample(
+                available=True,
+                volume="D:\\",
+                free_bytes=420 * 1024**3,
+                total_bytes=1024**4,
+                sampled_at=1.0,
+            ),
+        ),
+    )
+
+    line = renderer._build_compact_resource_line(
+        snapshot=snap,
+        glyphs=get_glyphs(use_unicode=True),
+        use_color=True,
+    )
+    assert line is not None
+
+    console = Console()
+    na_positions = [match.start() for match in re.finditer("N/A", line.plain)]
+    assert len(na_positions) == 3
+
+    for position in na_positions:
+        style = line.get_style_at_offset(console, position)
+        assert style.bold is not True
+        assert style.color is not None
+        assert style.color.triplet == (137, 153, 168)
 
 
 def test_minimal_layout_adds_constrained_resource_suffix():

@@ -873,13 +873,25 @@ class DashboardRenderer:
 
         line.append("RES ", style=_style(GRAY, use_color))
         line.append("CPU ", style=_style(GRAY, use_color))
-        line.append(cpu_value, style=_style(f"bold {GREEN}", use_color))
+        line.append(
+            cpu_value,
+            style=_style(f"bold {GREEN}" if resources.cpu.available else GRAY, use_color),
+        )
         line.append("  RAM ", style=_style(GRAY, use_color))
-        line.append(memory_value, style=_style(f"bold {CYAN}", use_color))
+        line.append(
+            memory_value,
+            style=_style(f"bold {CYAN}" if resources.memory.available else GRAY, use_color),
+        )
         line.append("  IO ", style=_style(GRAY, use_color))
-        line.append(io_value, style=_style(f"bold {YELLOW}", use_color))
+        line.append(
+            io_value,
+            style=_style(f"bold {YELLOW}" if resources.disk_io.available else GRAY, use_color),
+        )
         line.append("  FREE ", style=_style(GRAY, use_color))
-        line.append(free_value, style=_style(f"bold {GREEN}", use_color))
+        line.append(
+            free_value,
+            style=_style(f"bold {GREEN}" if resources.disk_free.available else GRAY, use_color),
+        )
         return line
 
     def _build_minimal_resource_suffix(self, snapshot: DashboardSnapshot) -> str:
