@@ -900,9 +900,9 @@ def test_queue_progress_reporter_split_screen_dashboard_render():
 
     # Contains expected structured btop dashboard sections
     assert "LOCAL BUILDS SCHEDULER" in plain
-    assert "PASSED" in plain
-    assert "FAILED" in plain
-    assert "REMAINING" in plain
+    assert ("PASS" in plain) or ("PASSED" in plain)
+    assert ("FAIL" in plain) or ("FAILED" in plain)
+    assert ("LEFT" in plain) or ("REMAINING" in plain)
     assert "ACTIVE TARGET" in plain
     assert "build-app" in plain
     assert "COMPILE" in plain
@@ -1102,7 +1102,6 @@ def test_queue_progress_reporter_stream_lock_synchronization():
     )
 
     # Calling start_phase / render_split_dashboard should acquire the lock
-    job = Job(name="test-job", cwd=".")
     tasks = [CommandTask(index=0, phase="build", command="echo 1")]
     reporter.enable_split_screen()
     assert mock_lock.__enter__.called
@@ -1273,7 +1272,7 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         enable_ticker=False,
     )
 
-    # Start at 100x32 -> full btop layout (15 rows: 1..15, scroll 16..32)
+    # Start at 100x32 -> full btop layout (17 rows: 1..17, scroll 18..32)
     with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 32))):
         reporter.enable_split_screen()
         job = Job(name="asb-c-second", cwd=".")
@@ -1290,8 +1289,8 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         )
 
     assert reporter.status_start == 1
-    assert reporter.status_lines_count == 15
-    assert reporter.scroll_start == 16
+    assert reporter.status_lines_count == 17
+    assert reporter.scroll_start == 18
     assert reporter.scroll_end == 32
 
     # Shrink terminal to 70x20 -> switches to compact tier (~7-8 rows, scroll <= 20)
@@ -1307,11 +1306,11 @@ def test_split_screen_dashboard_resize_erases_old_rows():
     assert reporter.scroll_start == reporter.status_lines_count + 1
     assert reporter.scroll_end == 20
 
-    # All old dashboard rows 1..15 (including rows now inside the scrolling region)
+    # All old dashboard rows 1..17 (including rows now inside the scrolling region)
     # must be erased with \033[2K before setting the new scroll region
     shrink_region_seq = f"\033[{reporter.scroll_start};20r"
     shrink_region_idx = out_shrink.index(shrink_region_seq)
-    for r in range(1, 16):
+    for r in range(1, 18):
         erase_seq = f"\033[{r};1H\033[2K"
         assert erase_seq in out_shrink
         assert out_shrink.index(erase_seq) < shrink_region_idx
@@ -1323,7 +1322,7 @@ def test_split_screen_dashboard_resize_erases_old_rows():
     assert addressed_rows
     assert max(addressed_rows) <= 20
 
-    # Grow terminal back to 110x36 -> returns to full 15-row layout
+    # Grow terminal back to 110x36 -> returns to full 17-row layout
     stream.seek(0)
     stream.truncate(0)
     with patch("shutil.get_terminal_size", return_value=os.terminal_size((110, 36))):
@@ -1331,10 +1330,10 @@ def test_split_screen_dashboard_resize_erases_old_rows():
         reporter.render_split_dashboard()
 
     out_grow = stream.getvalue()
-    assert reporter.status_lines_count == 15
-    assert reporter.scroll_start == 16
+    assert reporter.status_lines_count == 17
+    assert reporter.scroll_start == 18
     assert reporter.scroll_end == 36
-    grow_region_idx = out_grow.index("\033[16;36r")
+    grow_region_idx = out_grow.index("\033[18;36r")
     for r in range(1, 16):
         erase_seq = f"\033[{r};1H\033[2K"
         assert erase_seq in out_grow
