@@ -7,6 +7,7 @@ lbs.utils.executor – Command execution engine with live output streaming and m
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 import datetime
@@ -104,6 +105,24 @@ class JobExecutor:
             ):
                 print(f"[ERROR] {message}", file=sys.stderr)
 
+    def _notify_output_line(
+        self,
+        on_output_line: Callable[[str], None] | None,
+        text: str,
+    ) -> None:
+        """Invokes on_output_line once per physical line (preserving '\\n').
+
+        Exceptions raised by the callback are logged to stderr when verbose is
+        enabled, without failing command execution.
+        """
+        if on_output_line is None or not text:
+            return
+        for line in text.splitlines(keepends=True):
+            try:
+                on_output_line(line)
+            except Exception as exc:
+                self._write_stderr_error(f"Output line callback failed: {exc}")
+
     def run_command(
         self,
         cmd: str,
@@ -112,6 +131,7 @@ class JobExecutor:
         log_file=None,
         shell: bool = True,
         timeout: float | None = None,
+        on_output_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """
         Execute a shell or direct command inside cwd with environment overlays.
@@ -215,6 +235,7 @@ class JobExecutor:
                         log_file.flush()
 
                     self._write_stdout(sanitized_line)
+                    self._notify_output_line(on_output_line, sanitized_line)
 
                 if timed_out:
                     _terminate_process(process)
@@ -254,6 +275,7 @@ class JobExecutor:
                             log_file.write(sanitized_line)
                             log_file.flush()
                         self._write_stdout(sanitized_line)
+                        self._notify_output_line(on_output_line, sanitized_line)
 
                     process.wait()
                     exit_code = process.returncode

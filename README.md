@@ -23,7 +23,7 @@ Instead of maximizing parallel execution, Local Build Scheduler focuses on seria
 - **Concurrency Prevention**: Uses native, cross-platform file locking (`lbs.lock`) in the log directory to ensure only one instance runs at a time.
 - **Session Resuming**: Save state automatically, allowing you to resume interrupted sessions from incomplete (failed, partial, aborted, or skipped) jobs using `--resume latest`.
 - **Dry-Run Mode**: Validate and view the full planned execution details (including paths, environment variables, commands, retries, and timeouts) without running any commands.
-- **Split-Screen Live Dashboard**: By default on interactive terminals, splits the console into a live scrolling compiler viewport (top ~75%) and a pinned real-time status dashboard (bottom ~25%) with progress bar, active commands, queue counts, elapsed time, and dynamic terminal window tab title updates.
+- **Live `btop`-Inspired Split-Screen Dashboard**: By default on interactive ANSI terminals, pins a structured, color-coded dashboard to the top of the viewport (queue progress, live Ninja/Siso build progress, total & active elapsed timers, Passed/Failed/Remaining counters, active target/phase, and full wrapped command & log path) while raw compiler output streams continuously below. Automatically adapts to terminal size and falls back cleanly on `NO_COLOR`, ASCII codepages, or non-TTY pipes.
 - **Secure Credentials**: Separate notification files (`notifications.yaml`) and support environment variable interpolation (e.g., `${SMTP_PASSWORD}`) to avoid committing secrets to source control.
 
 ---
@@ -58,6 +58,23 @@ python -m venv .venv
 ```bash
 pip install -e .
 ```
+
+---
+
+## Demos
+
+### Dashboard Demo
+
+Preview the live dashboard with four simulated Chromium jobs without running a
+real build:
+
+```powershell
+lbs run demos\dashboard_demo\dashboard-demo.yaml --fresh
+```
+
+The demo covers multi-phase execution, Siso-style progress, counters, live
+compiler output, responsive layouts, and terminal resizing. See
+[`demos/dashboard_demo/`](demos/dashboard_demo/) for details.
 
 ---
 
@@ -154,7 +171,7 @@ The global entry point is `lbs`. It provides several subcommands.
 
 | Use Case / Goal | Command Invocations | Description & Behavior |
 | :--- | :--- | :--- |
-| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially with a live 75%/25% split-screen console (streaming live compiler output in the top 75% and pinning real-time queue progress in the bottom 25%). |
+| **Standard Run** | `lbs run config.yaml` | Executes all jobs defined in `config.yaml` sequentially with a live top-pinned `btop`-inspired status dashboard (queue & build progress bars, elapsed timers, Passed/Failed/Remaining cards, active target/command/log) while live compiler output scrolls continuously underneath. |
 | **Quiet Run** | `lbs run config.yaml -q` | Suppresses live compiler output streaming to the terminal and renders an in-place updating single-line progress bar; logs are still saved to disk and the summary table is displayed. |
 | **Dry Run** | `lbs run config.yaml --dry-run` | Validates configuration and prints the full execution plan (commands, envs, logs paths, timeouts, retries) without running them. |
 | **Filtered Run** | `lbs run config.yaml -j compile -j test` | Runs *only* the specified jobs (e.g. `compile` and `test`) in their sequence order. |
@@ -331,6 +348,25 @@ lbs run config.yaml --resume latest --shutdown   # power off automatically when 
 LBS secures an exclusive file lock (`lbs.lock`) in `log_dir` so two instances can't write to the same logs or build concurrently. If you hit this error and nothing is actually running, delete the stale `lbs.lock` file; otherwise close the other `lbs` session first.
 
 > **Don't reach for a build script's own `--no-sync`-style flag as a shortcut just because `lbs` already ran its `sync` phase.** A job's `build` step can still rely on that script's internal sync to do more than fetch — e.g. reapplying local patches that `lbs`'s own sync step resets. Skipping it can silently drop work that's unrelated to networking. Check what that flag actually gates in the underlying build script before assuming it's redundant.
+
+---
+
+## Live Build Dashboard & Terminal Support
+
+When running `lbs run <config>` in an interactive terminal (without `-q`/`--quiet`), LBS pins a color-coded monitoring dashboard above the live compiler output using DECSTBM scrolling regions and row-level diffing to avoid flicker:
+
+- **Build Monitor**: Displays queue progress, active build progress (automatically parsed from Ninja/Siso `[completed/total]` lines when available), and live 1 Hz total + active build elapsed timers alongside a color-coded status indicator (`RUNNING`, `RETRYING`, `FAILED`, `INTERRUPTED`).
+- **Execution Statistics**: Dedicated color-coded cards for **Passed**, **Failed**, and **Remaining** jobs.
+- **Active Target**: Shows the active target name, current phase badge, full active command (wrapped when needed, with build configuration tokens such as `--debug`/`--release` highlighted), and full active log path.
+- **Live Compiler Output**: Separated by a subtle rule; raw sanitized compiler output scrolls natively below without reformatting.
+
+### Responsive Layouts & Fallbacks
+
+- **Dynamic sizing**: Automatically steps down across full, medium, compact, and minimal layouts as terminal width or height shrinks so live compiler output always keeps scrolling room.
+- **`NO_COLOR` support**: Setting `NO_COLOR=1` disables ANSI colors while keeping the monochrome layout.
+- **ASCII & Legacy Windows Consoles**: Automatically detects non-UTF-8 encodings (e.g., `cp1252`) and falls back to ASCII borders (`+`, `-`, `|`) and bars (`#`, `-`).
+- **Non-TTY / `TERM=dumb`**: Pipes, CI logs, and dumb terminals automatically disable split-screen sequences and print plain-text milestone dividers.
+- **Clean Log Files**: Dashboard formatting and ANSI escape sequences are written strictly to the terminal and never leak into session or job log files.
 
 ---
 

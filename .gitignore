@@ -224,3 +224,10 @@ configs-internal/
 logs/
 lbs_state.json
 
+# Dashboard demo runtime output
+demos/dashboard_demo/logs/
+
+# Local-only workspaces, experiments, and delivery artifacts
+.vscode/
+docs-internal/
+
