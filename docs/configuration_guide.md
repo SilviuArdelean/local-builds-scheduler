@@ -241,6 +241,7 @@ jobs:
 | `retries` | `integer` | No | `0` | Number of times to retry the job's command sequence if any command fails. Must be $\ge 0$. |
 | `retry_delay_seconds` | `number` | No | `0` | Duration in seconds to sleep before initiating a retry attempt. Must be $\ge 0$. |
 | `command_timeout_minutes`| `number` | No | `null` | Maximum duration in minutes allowed for the job's command execution attempt before terminating the subprocess group. Must be $> 0$. |
+| `resume_setup_commands` | `list[str]` | No | `[]` | Safe, idempotent environment setup commands (e.g. `call neo.bat`, `call avast.bat`) replayed before remaining commands when resuming an incomplete phase or retrying in a fresh subprocess, even if already marked `DONE`. |
 
 ---
 
@@ -632,6 +633,34 @@ lbs run configs/my-config.yaml --resume latest
    All selected jobs in the previous session completed successfully. Nothing to resume.
    ```
    and exits cleanly with code `0`.
+
+#### Replaying Process-Local Environment Setup (`resume_setup_commands`)
+
+Environment mutations (such as `PATH` updates made by `call neo.bat` or `call avast.bat`) live **only inside the generated script subprocess** for that phase attempt. Any later phase, retry attempt, or `--resume latest` execution spawns a brand-new subprocess starting from a fresh environment.
+
+To recreate required toolchain environment state without re-running ordinary completed commands, declare safe, idempotent setup commands on the job:
+
+```yaml
+jobs:
+  - name: chromium-build
+    cwd: "d:\\sources\\browser-neo-one"
+    resume_setup_commands:
+      - "call neo.bat"
+    phases:
+      sync:
+        - "call neo.bat"
+        - "call git fetch origin"
+      build:
+        - "call neo.bat"
+        - "call python3 build.py --shared --debug --ccache -t chrome"
+        - "call neo.bat"
+        - "call python3 build.py --static --release --ccache -t chrome"
+```
+
+- **Exact matching**: Setup commands are matched by exact command string within the phase (never by `.bat`/`.cmd` heuristics).
+- **Idempotence required**: Commands in `resume_setup_commands` may execute more than once (on resume and on every retry attempt), so include only safe, idempotent setup scripts.
+- **Granular resume preserved**: Ordinary commands already marked `DONE` remain skipped on resume, and fully completed phases are skipped without replaying setup.
+- **Dry-run visibility**: `lbs run <config> --resume latest --dry-run` marks eligible completed setup commands as `[REPLAY]` while keeping ordinary completed commands as `[DONE]`.
 
 #### 6.3.1 Discarding Stale Resume State (`--fresh` and `lbs clean`)
 

@@ -768,16 +768,26 @@ def _print_dry_run_job_metadata(job: Job) -> None:
         print(f"  Timeout: {job.command_timeout_minutes}m")
 
 
-def _print_dry_run_resume_commands(tasks: list[CommandTask]) -> None:
-    """Prints command tasks with [DONE], [RESUME], or [PENDING] tags."""
+def _print_dry_run_resume_commands(
+    tasks: list[CommandTask],
+    resume_setup_commands: list[str] | None = None,
+) -> None:
+    """Prints command tasks with [DONE], [REPLAY], [RESUME], or [PENDING] tags."""
     print("  Commands:")
+    setup_cmds = set(resume_setup_commands or ())
+    incomplete_phases = {
+        t.phase for t in tasks if t.status != BuildStatus.DONE
+    }
     first_incomplete = True
 
     for t in tasks:
         dur_str = ""
         if t.status == BuildStatus.DONE:
-            tag = "[DONE]"
-            dur_str = f" (took {t.duration:.1f}s)" if t.duration is not None else ""
+            if t.command in setup_cmds and t.phase in incomplete_phases:
+                tag = "[REPLAY]"
+            else:
+                tag = "[DONE]"
+                dur_str = f" (took {t.duration:.1f}s)" if t.duration is not None else ""
         elif first_incomplete:
             tag = "[RESUME]"
             first_incomplete = False
@@ -841,7 +851,9 @@ def _print_dry_run_plan(
                 print(f"Job: {job.name}")
 
             _print_dry_run_job_metadata(job)
-            _print_dry_run_resume_commands(tasks)
+            _print_dry_run_resume_commands(
+                tasks, resume_setup_commands=job.resume_setup_commands
+            )
             print()
             continue
 
@@ -1192,9 +1204,14 @@ def _run_single_job(
         else:
             if attempt < total_attempts:
                 if tasks:
+                    setup_cmds = set(job.resume_setup_commands)
                     for t in tasks:
-                        if t.status == BuildStatus.FAILED:
+                        if t.status == BuildStatus.FAILED or (
+                            t.status == BuildStatus.DONE and t.command in setup_cmds
+                        ):
                             t.status = BuildStatus.PENDING
+                            t.exit_code = None
+                            t.duration = None
                 phase_str = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
                 log_to_session(f"Job {job.name}{phase_str} failed. Retrying in "
                                f"{job.retry_delay_seconds} seconds "
@@ -2112,15 +2129,18 @@ def _filter_phase_commands_to_run(
         return None
 
     phase_tasks = [t for t in job_command_tasks[job.name] if t.phase == phase_name]
-    if resume == "latest" and phase_tasks and all(t.status == BuildStatus.DONE for t in phase_tasks):
-        job_phase_results[job.name][phase_name] = True
-        return None
-
-    cmds_to_run = (
-        [t for t in phase_tasks if t.status != BuildStatus.DONE]
-        if resume == "latest"
-        else phase_tasks
-    )
+    if resume == "latest":
+        if not phase_tasks or all(t.status == BuildStatus.DONE for t in phase_tasks):
+            job_phase_results[job.name][phase_name] = True
+            return None
+        setup_cmds = set(job.resume_setup_commands)
+        cmds_to_run = [
+            t
+            for t in phase_tasks
+            if t.status != BuildStatus.DONE or t.command in setup_cmds
+        ]
+    else:
+        cmds_to_run = phase_tasks
     if not cmds_to_run:
         job_phase_results[job.name][phase_name] = True
         return None
@@ -2161,6 +2181,13 @@ def _execute_phase_run(
         _save_status(status_path, config_path, session_date, job_summaries, config_hash=current_config_hash)
         if progress_reporter is not None:
             progress_reporter.on_command_update(job_command_tasks)
+
+    setup_cmds = set(job.resume_setup_commands)
+    for t in cmds_to_run_tasks:
+        if t.status == BuildStatus.DONE and t.command in setup_cmds:
+            t.status = BuildStatus.PENDING
+            t.exit_code = None
+            t.duration = None
 
     cmds_to_run_tasks[0].status = BuildStatus.RUNNING
     job_summaries[job.name]["build_status"] = BuildStatus.RUNNING.value

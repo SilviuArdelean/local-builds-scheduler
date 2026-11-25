@@ -1050,3 +1050,142 @@ def test_scheduler_run_fresh_and_resume_mutually_exclusive(tmp_path):
     with pytest.raises(ValueError) as exc:
         Scheduler.run(config, resume="latest", fresh=True)
     assert "Cannot specify both 'fresh' and 'resume'" in str(exc.value)
+
+
+def test_filter_phase_commands_replays_marked_setup_commands_on_resume(tmp_path):
+    """Verify _filter_phase_commands_to_run replays DONE setup commands in incomplete phases only."""
+    from lbs.runner import CommandTask, _filter_phase_commands_to_run
+
+    job = Job(
+        name="chromium-job",
+        cwd=str(tmp_path),
+        phases={
+            "sync": ["call neo.bat", "call git fetch origin"],
+            "build": [
+                "call neo.bat",
+                "call extra_setup.bat",
+                "call python3 build.py --debug",
+                "call python3 build.py --release",
+            ],
+        },
+        resume_setup_commands=["call neo.bat", "call extra_setup.bat"],
+    )
+
+    # sync phase is completely DONE; build phase has setup1 DONE, setup2 DONE, debug DONE, release FAILED
+    tasks = [
+        CommandTask(index=0, phase="sync", command="call neo.bat", status=BuildStatus.DONE),
+        CommandTask(index=1, phase="sync", command="call git fetch origin", status=BuildStatus.DONE),
+        CommandTask(index=2, phase="build", command="call neo.bat", status=BuildStatus.DONE),
+        CommandTask(index=3, phase="build", command="call extra_setup.bat", status=BuildStatus.DONE),
+        CommandTask(index=4, phase="build", command="call python3 build.py --debug", status=BuildStatus.DONE),
+        CommandTask(index=5, phase="build", command="call python3 build.py --release", status=BuildStatus.FAILED),
+    ]
+    job_command_tasks = {"chromium-job": tasks}
+    job_summaries = {"chromium-job": {"status": "FAILED", "build_status": "FAILED"}}
+    job_phase_results = {"chromium-job": {}}
+
+    # 1. Fully completed sync phase is still skipped (setup not replayed)
+    sync_selected = _filter_phase_commands_to_run(
+        job=job,
+        phase_name="sync",
+        job_command_tasks=job_command_tasks,
+        job_summaries=job_summaries,
+        job_phase_results=job_phase_results,
+        aborted=False,
+        resume="latest",
+    )
+    assert sync_selected is None
+    assert job_phase_results["chromium-job"]["sync"] is True
+
+    # 2. Incomplete build phase replays both setup commands in configured order + failed release build,
+    #    skipping the ordinary DONE debug build, and without mutating task statuses yet.
+    build_selected = _filter_phase_commands_to_run(
+        job=job,
+        phase_name="build",
+        job_command_tasks=job_command_tasks,
+        job_summaries=job_summaries,
+        job_phase_results=job_phase_results,
+        aborted=False,
+        resume="latest",
+    )
+    assert build_selected is not None
+    assert [t.command for t in build_selected] == [
+        "call neo.bat",
+        "call extra_setup.bat",
+        "call python3 build.py --release",
+    ]
+    # Pre-execution filter must not mutate persisted DONE status
+    assert tasks[2].status == BuildStatus.DONE
+    assert tasks[3].status == BuildStatus.DONE
+
+
+def test_resume_replays_environment_setup_end_to_end(tmp_path):
+    """End-to-end test: setup mutates process env, cmd1 succeeds, cmd2 fails then succeeds on resume
+    because setup is replayed while ordinary DONE cmd1 is NOT repeated.
+    """
+    log_dir = tmp_path / "logs"
+    tracker = tmp_path / "tracker.txt"
+    fail_once_flag = tmp_path / "fail_once.flag"
+    fail_once_flag.write_text("fail", encoding="utf-8")
+
+    if sys.platform == "win32":
+        setup_script = tmp_path / "setup_env.bat"
+        setup_script.write_text(
+            "@echo off\n"
+            "set LBS_RESUME_ENV=from_setup\n"
+            f'"{sys.executable}" -c "open(r\'{tracker}\', \'a\').write(\'setup\\n\')"\n',
+            encoding="utf-8",
+        )
+        setup_cmd = "call setup_env.bat"
+    else:
+        setup_script = tmp_path / "setup_env.sh"
+        setup_script.write_text(
+            "export LBS_RESUME_ENV=from_setup\n"
+            f'"{sys.executable}" -c "open(r\'{tracker}\', \'a\').write(\'setup\\n\')"\n',
+            encoding="utf-8",
+        )
+        setup_cmd = ". ./setup_env.sh"
+
+    ordinary_cmd = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"assert os.environ.get('LBS_RESUME_ENV') == 'from_setup'; "
+        f"open(r'{tracker.as_posix()}', 'a').write('build1\\n')\""
+    )
+    dependent_cmd = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"env_val = os.environ.get('LBS_RESUME_ENV', ''); "
+        f"open(r'{tracker.as_posix()}', 'a').write('build2:' + env_val + '\\n'); "
+        f"sys.exit(1 if os.path.exists(r'{fail_once_flag.as_posix()}') or env_val != 'from_setup' else 0)\""
+    )
+
+    job = Job(
+        name="env-resume-job",
+        cwd=str(tmp_path),
+        commands=[setup_cmd, ordinary_cmd, dependent_cmd],
+        resume_setup_commands=[setup_cmd],
+    )
+    config = Config(settings=Settings(log_dir=str(log_dir), stop_on_failure=True), jobs=[job])
+
+    # Run 1: setup succeeds, build1 succeeds, build2 fails (because fail_once_flag exists)
+    assert Scheduler.run(config) is False
+    assert tracker.read_text(encoding="utf-8").splitlines() == [
+        "setup",
+        "build1",
+        "build2:from_setup",
+    ]
+
+    # Fix failure condition and resume
+    fail_once_flag.unlink()
+    assert Scheduler.run(config, resume="latest") is True
+
+    # Setup replayed, build1 was NOT repeated, and build2 observed recreated LBS_RESUME_ENV
+    assert tracker.read_text(encoding="utf-8").splitlines() == [
+        "setup",
+        "build1",
+        "build2:from_setup",
+        "setup",
+        "build2:from_setup",
+    ]
+

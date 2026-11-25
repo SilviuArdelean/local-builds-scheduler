@@ -357,3 +357,68 @@ def test_dry_run_resume_phased_commands(tmp_path, capsys):
     assert "[RESUME]  (build)  compile.py" in captured.out
     assert "[PENDING] (build)  package.py" in captured.out
 
+
+def test_dry_run_resume_shows_replay_for_marked_setup_in_incomplete_phase_only(tmp_path, capsys):
+    """Verify [REPLAY] appears for DONE setup commands only in incomplete phases, while
+    ordinary DONE commands stay [DONE] and completed phases do not advertise replay.
+    """
+    import json
+    from lbs.config import Config, Job, Settings
+    from lbs.runner import Scheduler
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    status_file = log_dir / "lbs_status_replay-test.json"
+
+    status_data = {
+        "config_file": "configs/replay-test.yaml",
+        "session_date": "2026-11-25",
+        "jobs": {
+            "job-replay": {
+                "build_status": "FAILED",
+                "status": "FAILED",
+                "commands": [
+                    {"index": 0, "phase": "sync", "command": "call neo.bat", "status": "DONE", "duration": 0.5},
+                    {"index": 1, "phase": "sync", "command": "call git fetch origin", "status": "DONE", "duration": 3.0},
+                    {"index": 2, "phase": "build", "command": "call neo.bat", "status": "DONE", "duration": 0.4},
+                    {"index": 3, "phase": "build", "command": "debug build.py", "status": "DONE", "duration": 120.0},
+                    {"index": 4, "phase": "build", "command": "release build.py", "status": "FAILED", "duration": 10.0},
+                    {"index": 5, "phase": "build", "command": "package.py", "status": "PENDING", "duration": None},
+                ],
+            }
+        },
+    }
+    status_file.write_text(json.dumps(status_data), encoding="utf-8")
+
+    job = Job(
+        name="job-replay",
+        cwd=str(tmp_path),
+        phases={
+            "sync": ["call neo.bat", "call git fetch origin"],
+            "build": ["call neo.bat", "debug build.py", "release build.py", "package.py"],
+        },
+        resume_setup_commands=["call neo.bat"],
+    )
+    config = Config(settings=Settings(log_dir=str(log_dir)), jobs=[job])
+
+    assert Scheduler.run(
+        config,
+        dry_run=True,
+        resume="latest",
+        config_path="configs/replay-test.yaml",
+    ) is True
+
+    out = capsys.readouterr().out
+    # Completed count still reflects persisted DONE commands (4 of 6)
+    assert "Job: job-replay [RESUMING - 4 of 6 commands completed]" in out
+    # Fully completed sync phase does NOT advertise [REPLAY]
+    assert "[DONE]    (sync)  call neo.bat (took 0.5s)" in out
+    assert "[DONE]    (sync)  call git fetch origin (took 3.0s)" in out
+    # Incomplete build phase shows [REPLAY] for marked setup, [DONE] for ordinary completed command,
+    # [RESUME] for first incomplete command, and [PENDING] for remaining commands
+    assert "[REPLAY]  (build)  call neo.bat" in out
+    assert "[DONE]    (build)  debug build.py (took 120.0s)" in out
+    assert "[RESUME]  (build)  release build.py" in out
+    assert "[PENDING] (build)  package.py" in out
+
+
