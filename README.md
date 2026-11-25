@@ -61,6 +61,23 @@ pip install -e .
 
 ---
 
+## Demos
+
+### Dashboard Demo
+
+Preview the live dashboard with four simulated Chromium jobs without running a
+real build:
+
+```powershell
+lbs run demos\dashboard_demo\dashboard-demo.yaml --fresh
+```
+
+The demo covers multi-phase execution, Siso-style progress, counters, live
+compiler output, responsive layouts, and terminal resizing. See
+[`demos/dashboard_demo/`](demos/dashboard_demo/) for details.
+
+---
+
 ## Configuration
 
 LBS uses YAML for configuration. The main configuration defines global settings and individual job blocks. For full details on schema parameters, cross-job phases, Windows `cmd.exe` batch requirements, and repository isolation, refer to the [Comprehensive Configuration Files Architecture & Usage Guide](docs/configuration_guide.md).

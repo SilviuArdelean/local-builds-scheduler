@@ -1,0 +1,39 @@
+# Safe demo config: previews the btop-inspired dashboard without building anything.
+# Run from the repository root:
+#   lbs run demos\dashboard_demo\dashboard-demo.yaml --fresh
+settings:
+  log_dir: demos/dashboard_demo/logs
+  stop_on_failure: false
+
+jobs:
+  - name: chromium-c-main
+    cwd: demos/dashboard_demo
+    phases:
+      sync:
+        - python -c "import time; print('HEAD is now at 9f8e7d6'); time.sleep(3)"
+      build:
+        - python siso_sim.py 20000 100 0.04 --release
+
+  - name: chromium-d-main
+    cwd: demos/dashboard_demo
+    phases:
+      sync:
+        - python -c "import time; print('Fetching origin...'); time.sleep(3)"
+      build:
+        - python siso_sim.py 63295 300 0.05 --shared --debug --ccache -t chrome
+
+  - name: chromium-e-main
+    cwd: demos/dashboard_demo
+    phases:
+      sync:
+        - python -c "import time; print('Syncing refs for chromium-e-main...'); time.sleep(2)"
+      build:
+        - python siso_sim.py 42000 240 0.04 --shared --release --ccache -t chrome
+
+  - name: chromium-f-main
+    cwd: demos/dashboard_demo
+    phases:
+      sync:
+        - python -c "import time; print('Updating chromium-f-main metadata...'); time.sleep(2)"
+      build:
+        - python siso_sim.py 51000 260 0.04 --shared --debug --ccache -t content_shell
