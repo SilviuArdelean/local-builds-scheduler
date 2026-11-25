@@ -743,7 +743,14 @@ class DashboardRenderer:
             style=_style(f"bold {st_color}", use_color),
         )
 
-        # Row 3-4: Wrapped CMD & LOG
+        # Row 3: Compact system resources summary (when monitoring has samples)
+        resource_line = self._build_compact_resource_line(
+            snapshot=snapshot,
+            glyphs=glyphs,
+            use_color=use_color,
+        )
+
+        # Row 4-5: Wrapped CMD & LOG
         details = Table.grid(expand=True, padding=(0, 0))
         details.add_column(width=4, no_wrap=True)
         details.add_column(ratio=1)
@@ -755,8 +762,13 @@ class DashboardRenderer:
         details.add_row(Text("CMD ", style=_style(f"bold {GRAY}", use_color)), cmd_val)
         details.add_row(Text("LOG ", style=_style(f"bold {GRAY}", use_color)), log_val)
 
+        render_items: list[RenderableType] = [metrics_line, summary_line]
+        if resource_line is not None:
+            render_items.append(resource_line)
+        render_items.append(details)
+
         panel = Panel(
-            Group(metrics_line, summary_line, details),
+            Group(*render_items),
             title=title,
             title_align="left",
             box=glyphs.box_style,
@@ -798,6 +810,12 @@ class DashboardRenderer:
             f"{glyphs.dot} {snapshot.status_label}",
             style=_style(f"bold {st_color}", use_color),
         )
+        minimal_suffix = self._build_minimal_resource_suffix(snapshot)
+        if minimal_suffix:
+            line1.append(
+                f" {minimal_suffix}",
+                style=_style(GRAY, use_color),
+            )
 
         line2 = Text(no_wrap=True, overflow=overflow_mode)
         line2.append(
@@ -814,6 +832,64 @@ class DashboardRenderer:
 
         sep = _make_output_separator(width=width, glyphs=glyphs, use_color=use_color)
         return Group(line1, line2, sep)
+
+    def _build_compact_resource_line(
+        self,
+        snapshot: DashboardSnapshot,
+        glyphs: GlyphSet,
+        use_color: bool,
+    ) -> Text | None:
+        resources = snapshot.system_resources
+        if not (
+            resources.cpu.available
+            or resources.memory.available
+            or resources.disk_io.available
+            or resources.disk_free.available
+        ):
+            return None
+
+        overflow_mode: Literal["ellipsis", "crop"] = (
+            "ellipsis" if glyphs.rule_char != "-" else "crop"
+        )
+        line = Text(overflow=overflow_mode, no_wrap=True)
+
+        cpu_value = f"{resources.cpu.value:.0f}%" if resources.cpu.available else "N/A"
+        memory_value = (
+            f"{resources.memory.used_percent:.0f}%"
+            if resources.memory.available
+            else "N/A"
+        )
+        io_value = (
+            f"{format_bytes_rate_iec(resources.disk_io.read_bytes_per_second)}"
+            f"/{format_bytes_rate_iec(resources.disk_io.write_bytes_per_second)}"
+            if resources.disk_io.available
+            else "N/A"
+        )
+        free_value = (
+            format_bytes_iec(resources.disk_free.free_bytes, decimals=0)
+            if resources.disk_free.available
+            else "N/A"
+        )
+
+        line.append("RES ", style=_style(GRAY, use_color))
+        line.append("CPU ", style=_style(GRAY, use_color))
+        line.append(cpu_value, style=_style(f"bold {GREEN}", use_color))
+        line.append("  RAM ", style=_style(GRAY, use_color))
+        line.append(memory_value, style=_style(f"bold {CYAN}", use_color))
+        line.append("  IO ", style=_style(GRAY, use_color))
+        line.append(io_value, style=_style(f"bold {YELLOW}", use_color))
+        line.append("  FREE ", style=_style(GRAY, use_color))
+        line.append(free_value, style=_style(f"bold {GREEN}", use_color))
+        return line
+
+    def _build_minimal_resource_suffix(self, snapshot: DashboardSnapshot) -> str:
+        resources = snapshot.system_resources
+        if not (resources.cpu.available or resources.memory.available):
+            return ""
+
+        cpu = f"{resources.cpu.value:.0f}" if resources.cpu.available else "-"
+        ram = f"{resources.memory.used_percent:.0f}" if resources.memory.available else "-"
+        return f"R:{cpu}/{ram}"
 
     def _render_to_lines(
         self,

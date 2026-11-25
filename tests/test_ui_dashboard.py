@@ -238,6 +238,41 @@ def test_full_layout_resources_show_na_when_unavailable():
     assert plain.count("N/A") >= 4
 
 
+def test_compact_layout_includes_resource_summary_when_available():
+    """Compact tier should show resource summary when any sample is available."""
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=70, height=21)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "RES CPU" in plain
+    assert "RAM" in plain
+    assert "IO" in plain
+    assert "FREE" in plain
+    assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_compact_layout_omits_resource_summary_when_unavailable():
+    """Compact tier should omit resource line when no resource sample is available."""
+    renderer = DashboardRenderer()
+    snap = replace(_sample_snapshot(), system_resources=SystemResourcesSnapshot())
+    lines = renderer.render(snap, width=70, height=21)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "RES CPU" not in plain
+    assert "LIVE COMPILER OUTPUT" in plain
+
+
+def test_minimal_layout_adds_constrained_resource_suffix():
+    """Minimal tier should append short R:cpu/ram suffix when resources are available."""
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=80, height=12)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "R:84/48" in plain
+
+
 def test_long_command_and_log_path_wrap_without_truncation():
     """Verify full active command and log path are preserved via wrapping."""
     long_cmd = (
