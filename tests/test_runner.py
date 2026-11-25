@@ -1631,6 +1631,143 @@ def test_queue_progress_reporter_non_split_ansi_tty_renders_colorized_milestone_
     assert "LIVE COMPILER OUTPUT" in plain
 
 
+def test_retry_rearms_setup_command_and_recovers_from_transient_setup_failure(tmp_path):
+    """Verify setup runs on every retry, transient setup failure recovers, and failure attribution is accurate."""
+    log_dir = tmp_path / "logs"
+    counter_file = tmp_path / "setup_count.txt"
+    tracker = tmp_path / "retry_tracker.txt"
+
+    # Case 1: Setup fails on attempt 1, succeeds on attempt 2 (transient setup failure recovery)
+    setup_cmd = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"p = r'{counter_file.as_posix()}'; "
+        f"n = int(open(p).read()) + 1 if os.path.exists(p) else 1; "
+        f"open(p, 'w').write(str(n)); "
+        f"open(r'{tracker.as_posix()}', 'a').write(f'setup:{{n}}\\n'); "
+        f'sys.exit(1 if n == 1 else 0)"'
+    )
+    dep_cmd = (
+        f'"{sys.executable}" -c '
+        f'"open(r\'{tracker.as_posix()}\', \'a\').write(\'dep\\n\')"'
+    )
+
+    job_recover = Job(
+        name="retry-setup-recover",
+        cwd=str(tmp_path),
+        commands=[setup_cmd, dep_cmd],
+        resume_setup_commands=[setup_cmd],
+        retries=1,
+        retry_delay_seconds=0.01,
+    )
+    config1 = Config(settings=Settings(log_dir=str(log_dir)), jobs=[job_recover])
+    assert run_scheduler(config1) is True
+    assert tracker.read_text(encoding="utf-8").splitlines() == [
+        "setup:1",
+        "setup:2",
+        "dep",
+    ]
+
+
+def test_retry_setup_failure_on_second_attempt_attributed_to_setup_not_dependent(tmp_path):
+    """Verify that if setup succeeds on attempt 1 (dep fails), then setup fails on attempt 2,
+    the persisted status attributes FAILED to the setup task and leaves dep PENDING.
+    """
+    import json
+    log_dir = tmp_path / "logs"
+    setup_counter = tmp_path / "setup_n.txt"
+
+    # Setup succeeds on attempt 1, fails on attempt 2
+    setup_cmd = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"p = r'{setup_counter.as_posix()}'; "
+        f"n = int(open(p).read()) + 1 if os.path.exists(p) else 1; "
+        f"open(p, 'w').write(str(n)); "
+        f'sys.exit(0 if n == 1 else 7)"'
+    )
+    # Dependent always fails on attempt 1
+    dep_cmd = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+
+    job = Job(
+        name="retry-setup-fail-2nd",
+        cwd=str(tmp_path),
+        commands=[setup_cmd, dep_cmd],
+        resume_setup_commands=[setup_cmd],
+        retries=1,
+        retry_delay_seconds=0.01,
+    )
+    config = Config(settings=Settings(log_dir=str(log_dir)), jobs=[job])
+    assert run_scheduler(config) is False
+
+    status_data = json.loads((log_dir / "lbs_status.json").read_text(encoding="utf-8"))
+    cmds = status_data["jobs"]["retry-setup-fail-2nd"]["commands"]
+    assert cmds[0]["status"] == "FAILED"
+    assert cmds[0]["exit_code"] == 7
+    assert cmds[1]["status"] == "PENDING"
+
+
+def test_retry_previously_done_ordinary_command_failing_on_retry_is_attributed_correctly(tmp_path):
+    """Verify that if an ordinary (non-setup) command succeeds on attempt 1 (while cmd 2 fails),
+    and then cmd 1 fails on attempt 2, FAILED is attributed to cmd 1 and cmd 2 stays PENDING.
+    """
+    import json
+    log_dir = tmp_path / "logs"
+    cmd1_counter = tmp_path / "cmd1_n.txt"
+
+    # Ordinary cmd1 succeeds on attempt 1, fails with exit code 9 on attempt 2
+    cmd1 = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"p = r'{cmd1_counter.as_posix()}'; "
+        f"n = int(open(p).read()) + 1 if os.path.exists(p) else 1; "
+        f"open(p, 'w').write(str(n)); "
+        f'sys.exit(0 if n == 1 else 9)"'
+    )
+    cmd2 = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+
+    job = Job(
+        name="retry-ordinary-fail-2nd",
+        cwd=str(tmp_path),
+        commands=[cmd1, cmd2],
+        retries=1,
+        retry_delay_seconds=0.01,
+    )
+    config = Config(settings=Settings(log_dir=str(log_dir)), jobs=[job])
+    assert run_scheduler(config) is False
+
+    status_data = json.loads((log_dir / "lbs_status.json").read_text(encoding="utf-8"))
+    cmds = status_data["jobs"]["retry-ordinary-fail-2nd"]["commands"]
+    assert cmds[0]["status"] == "FAILED"
+    assert cmds[0]["exit_code"] == 9
+    assert cmds[1]["status"] == "PENDING"
+
+
+def test_progress_monitor_and_reconcile_with_replayed_setup_task(tmp_path):
+    """Verify _JobProgressMonitor and _reconcile_attempt_failure handle replayed setup tasks accurately."""
+    from lbs.runner import _JobProgressMonitor, _reconcile_attempt_failure
+
+    prog_path = tmp_path / "prog.log"
+    setup_task = CommandTask(index=0, phase="build", command="call neo.bat", status=BuildStatus.PENDING)
+    dep_task = CommandTask(index=2, phase="build", command="call python3 build.py", status=BuildStatus.PENDING)
+
+    # 1. Replayed setup transitions PENDING -> RUNNING -> DONE cleanly
+    monitor = _JobProgressMonitor([setup_task, dep_task], prog_path)
+    monitor.apply_line("START:0")
+    assert setup_task.status == BuildStatus.RUNNING
+    monitor.apply_line("DONE:0:0")
+    assert setup_task.status == BuildStatus.DONE
+    assert setup_task.exit_code == 0
+    assert dep_task.status == BuildStatus.PENDING
+
+    # 2. Failure reconciliation when setup fails leaves unstarted dependent task PENDING
+    setup_fail = CommandTask(index=0, phase="build", command="call neo.bat", status=BuildStatus.RUNNING)
+    dep_unstarted = CommandTask(index=2, phase="build", command="call python3 build.py", status=BuildStatus.PENDING)
+    _reconcile_attempt_failure([setup_fail, dep_unstarted], exit_code=1, task_start_times={})
+    assert setup_fail.status == BuildStatus.FAILED
+    assert dep_unstarted.status == BuildStatus.PENDING
+
+
 
 
 

@@ -154,6 +154,7 @@ The `jobs` key contains a list of jobs executed sequentially in the specified or
 | `retries` | `integer` | `0` | Number of times to retry the job's entire sequence if any command fails. |
 | `retry_delay_seconds` | `number` | `0` | Delay (in seconds) to wait before retrying the job. |
 | `command_timeout_minutes`| `number` | `null` | Max execution duration (in minutes) allowed for the entire job command sequence. Commands exceeding this are terminated. |
+| `resume_setup_commands` | `list[str]` | `[]` | Optional list of safe, idempotent environment setup commands (e.g. `call neo.bat`, `call avast.bat`) that must replay when resuming an incomplete phase or retrying in a fresh subprocess, even if already marked `DONE`. |
 
 ---
 
@@ -313,7 +314,7 @@ lbs run config.yaml --mode sequential --resume latest
 This reads the saved status file and:
 1. Reconstructs the status of all jobs and individual commands from the previous session.
 2. Skips all jobs that already completed with a `SUCCESS` status.
-3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping individual commands that already succeeded (`DONE`)** so builds resume right where they left off.
+3. Sequentially executes only the remaining incomplete (`FAILED`, `PARTIAL`, `ABORTED`, `INTERRUPTED`, or `PENDING`) jobs, **skipping ordinary commands that already succeeded (`DONE`)** so builds resume right where they left off. Because environment mutations (such as `PATH` updates from `call neo.bat` or `call avast.bat`) live only inside each generated script process and do not survive into a later phase, retry, or resumed subprocess, any command listed in a job's `resume_setup_commands` is replayed automatically before remaining commands in an incomplete phase (and on every retry). Only put safe, idempotent setup commands in `resume_setup_commands`, as they may execute more than once.
 4. If all selected jobs had already succeeded, it prints a status message and exits immediately.
 
 Pairing it with `--mode sequential` keeps each job's own phases close together in time (a job's `build` starts right after its own `sync` instead of waiting behind other jobs' builds) — useful after a failure caused by something going stale or unreachable during a long wait between phases (e.g. a VPN/network drop during another job's multi-hour build).

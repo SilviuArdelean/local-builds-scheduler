@@ -134,6 +134,7 @@ jobs:
   * `commands`: A list of commands. 
     * **Windows Note**: When calling other batch scripts inside commands, prefix them with `call` (e.g. `call avast.bat`).
   * `env`: *(Optional)* A key-value dictionary of environment variables specific to this job.
+  * `resume_setup_commands`: *(Optional)* A list of safe, idempotent setup commands (e.g. `call neo.bat`) that replay in a fresh subprocess whenever an incomplete phase is resumed or retried. Environment mutations live only inside each generated script process, so later phases, retries, and resumes start from a fresh environment; ordinary `DONE` commands remain skipped.
   * `retries` / `retry_delay_seconds`: *(Optional)* Number of retries and pause interval upon command failure.
   * `command_timeout_minutes`: *(Optional)* Terminate the execution if it hangs.
 
@@ -186,7 +187,7 @@ lbs run my-build-config.yaml -j compile-project
   ```bash
   lbs run my-build-config.yaml --resume latest
   ```
-  **Granular Resumption**: LBS skips jobs that already completed with `SUCCESS`. For jobs that were `FAILED`, `PARTIAL`, `ABORTED`, or `INTERRUPTED`, LBS matches commands against the saved status profile and **skips commands that already succeeded (`DONE`)**, resuming execution immediately from the first incomplete command.
+  **Granular Resumption**: LBS skips jobs that already completed with `SUCCESS`. For jobs that were `FAILED`, `PARTIAL`, `ABORTED`, or `INTERRUPTED`, LBS matches commands against the saved status profile and **skips ordinary commands that already succeeded (`DONE`)**, resuming execution from the first incomplete command. Any command listed in `resume_setup_commands` is replayed automatically (shown as `[REPLAY]` in `--dry-run`) because setup scripts may execute more than once to recreate process-local environment state in the new subprocess.
 * **Inspecting Status**: To inspect what happened in a previous or interrupted session without starting execution:
   ```bash
   lbs status my-build-config.yaml

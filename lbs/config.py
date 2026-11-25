@@ -89,6 +89,7 @@ class Job:
     retry_delay_seconds: int | float = 0
     command_timeout_minutes: int | float | None = None
     build_it: bool = True
+    resume_setup_commands: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.phases and self.commands:
@@ -234,6 +235,20 @@ def _validate_job_options(job_data: dict, name: str) -> None:
         if not isinstance(build_it, bool):
             raise ConfigError(
                 f"Job '{name}' 'build_it' field must be a boolean")
+
+    # Resume Setup Commands (Optional)
+    if "resume_setup_commands" in job_data:
+        setup_cmds = job_data["resume_setup_commands"]
+        if not isinstance(setup_cmds, list):
+            raise ConfigError(
+                f"Job '{name}' 'resume_setup_commands' field must be a list"
+            )
+        for s_idx, cmd in enumerate(setup_cmds):
+            if not isinstance(cmd, str) or not cmd.strip():
+                raise ConfigError(
+                    f"Job '{name}' 'resume_setup_commands' entry at index {s_idx} "
+                    "must be a non-empty string"
+                )
 
 
 def _validate_job(
@@ -595,6 +610,9 @@ def load_config(
                 retry_delay_seconds=job_data.get("retry_delay_seconds", 0),
                 command_timeout_minutes=job_data.get("command_timeout_minutes",
                                                      None),
-                build_it=job_data.get("build_it", True)))
+                build_it=job_data.get("build_it", True),
+                resume_setup_commands=list(
+                    job_data.get("resume_setup_commands", [])
+                )))
 
     return Config(settings=settings, jobs=jobs)

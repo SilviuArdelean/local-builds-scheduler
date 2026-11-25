@@ -972,5 +972,75 @@ def test_load_config_check_cwd_false_and_job_filter(tmp_path):
     assert "Job 'job-missing' 'cwd' directory does not exist" in str(exc2.value)
 
 
+def test_config_resume_setup_commands_valid_and_default(tmp_path):
+    """Verify resume_setup_commands loads valid lists, defaults to [], and works with commands and phases."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    cfg_path = tmp_path / "resume_setup.yaml"
+    cfg_path.write_text(
+        f"""
+        jobs:
+          - name: job-default
+            cwd: "{workspace_dir.as_posix()}"
+            commands:
+              - "echo hello"
+          - name: job-with-setup
+            cwd: "{workspace_dir.as_posix()}"
+            resume_setup_commands:
+              - "call neo.bat"
+              - "call extra_env.bat"
+            phases:
+              sync:
+                - "call neo.bat"
+                - "call git fetch origin"
+              build:
+                - "call neo.bat"
+                - "call python3 build.py"
+        """,
+        encoding="utf-8",
+    )
+
+    config = load_config(cfg_path)
+    assert config.jobs[0].resume_setup_commands == []
+    assert config.jobs[1].resume_setup_commands == ["call neo.bat", "call extra_env.bat"]
+
+
+@pytest.mark.parametrize(
+    ("raw_yaml_value", "expected_error"),
+    [
+        ('"call neo.bat"', "'resume_setup_commands' field must be a list"),
+        ('[""]', "entry at index 0 must be a non-empty string"),
+        ('["   "]', "entry at index 0 must be a non-empty string"),
+        ('["call neo.bat", 123]', "entry at index 1 must be a non-empty string"),
+        ('["call neo.bat", null]', "entry at index 1 must be a non-empty string"),
+    ],
+)
+def test_config_resume_setup_commands_validation_errors(
+    tmp_path, raw_yaml_value, expected_error
+):
+    """Reject non-list, empty/whitespace, and non-string entries in resume_setup_commands."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    cfg_path = tmp_path / "bad_setup.yaml"
+    cfg_path.write_text(
+        f"""
+        jobs:
+          - name: bad-job
+            cwd: "{workspace_dir.as_posix()}"
+            resume_setup_commands: {raw_yaml_value}
+            commands:
+              - "echo hi"
+        """,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg_path)
+    assert expected_error in str(exc.value)
+
+
+
 
 
