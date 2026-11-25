@@ -2185,7 +2185,9 @@ def _execute_phase_run(
 
     setup_cmds = set(job.resume_setup_commands)
     for t in cmds_to_run_tasks:
-        if t.status == BuildStatus.DONE and t.command in setup_cmds:
+        if t.status == BuildStatus.FAILED or (
+            t.status == BuildStatus.DONE and t.command in setup_cmds
+        ):
             t.status = BuildStatus.PENDING
             t.exit_code = None
             t.duration = None

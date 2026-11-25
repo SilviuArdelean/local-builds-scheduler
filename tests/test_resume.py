@@ -1189,3 +1189,12 @@ def test_resume_replays_environment_setup_end_to_end(tmp_path):
         "build2:from_setup",
     ]
 
+    # Persisted status must record DONE and exit_code 0 for every command, including
+    # the previously-FAILED dependent command that ran after replayed setup.
+    status_data = json.loads((log_dir / "lbs_status.json").read_text(encoding="utf-8"))
+    job_record = status_data["jobs"]["env-resume-job"]
+    assert job_record["status"] == "SUCCESS"
+    assert job_record["build_status"] == "DONE"
+    assert [c["status"] for c in job_record["commands"]] == ["DONE", "DONE", "DONE"]
+    assert [c["exit_code"] for c in job_record["commands"]] == [0, 0, 0]
+
