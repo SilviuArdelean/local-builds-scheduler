@@ -7,9 +7,11 @@ lbs.ui.state – Immutable state snapshots and formatting helpers for the dashbo
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import math
+from dataclasses import dataclass, field
+from enum import Enum
+
+from lbs.monitoring import SystemResourcesSnapshot
 
 
 class ExecutionStatus(str, Enum):
@@ -97,6 +99,9 @@ class DashboardSnapshot:
     status: ExecutionStatus = ExecutionStatus.RUNNING
     retry_attempt: int = 1
     max_retries: int = 0
+    system_resources: SystemResourcesSnapshot = field(
+        default_factory=SystemResourcesSnapshot
+    )
 
     @property
     def clamped_queue_percent(self) -> float:
