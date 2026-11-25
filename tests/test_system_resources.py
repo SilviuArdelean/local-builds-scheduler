@@ -260,3 +260,73 @@ def test_system_resources_monitor_isolates_failed_metric_updates():
     assert snapshot.disk_free.available is True
     assert snapshot.memory.used_percent == 25.0
     assert snapshot.disk_io.read_bytes_per_second == 4.0
+
+
+def test_system_resources_monitor_warms_up_disk_io_baseline_within_one_second():
+    from lbs.monitoring.models import (
+        DiskFreeSample,
+        DiskIoSample,
+        MemorySample,
+        PercentSample,
+    )
+
+    clock = _FakeClock(start=50.0)
+    disk_io_calls = {"count": 0}
+
+    def _disk_io_sample(now: float) -> DiskIoSample:
+        disk_io_calls["count"] += 1
+        if disk_io_calls["count"] == 1:
+            return DiskIoSample(
+                available=False,
+                sampled_at=now,
+                error="collecting baseline",
+            )
+        return DiskIoSample(
+            available=True,
+            sampled_at=now,
+            read_bytes_per_second=11.0,
+            write_bytes_per_second=7.0,
+        )
+
+    monitor = SystemResourcesMonitor(
+        cpu_collector=_RecordingCollector(
+            lambda now: PercentSample(available=True, sampled_at=now, value=1.0)
+        ),
+        memory_collector=_RecordingCollector(
+            lambda now: MemorySample(
+                available=True,
+                sampled_at=now,
+                used_bytes=100,
+                total_bytes=1000,
+                used_percent=10.0,
+            )
+        ),
+        disk_io_collector=_RecordingCollector(_disk_io_sample),
+        disk_free_collector=_RecordingDiskFreeCollector(
+            lambda now, workspace: DiskFreeSample(
+                available=True,
+                sampled_at=now,
+                volume="C:\\",
+                free_bytes=1,
+                total_bytes=2,
+            )
+        ),
+        clock=clock,
+        disk_io_interval_seconds=10.0,
+    )
+
+    first = monitor.poll(workspace=Path("C:\\repo"), now=clock.now)
+    assert first.disk_io.available is False
+    assert disk_io_calls["count"] == 1
+
+    clock.advance(0.9)
+    still_baseline = monitor.poll(now=clock.now)
+    assert still_baseline.disk_io.available is False
+    assert disk_io_calls["count"] == 1
+
+    clock.advance(0.2)
+    warmed = monitor.poll(now=clock.now)
+    assert warmed.disk_io.available is True
+    assert warmed.disk_io.read_bytes_per_second == 11.0
+    assert warmed.disk_io.write_bytes_per_second == 7.0
+    assert disk_io_calls["count"] == 2

@@ -4,6 +4,9 @@
 settings:
   log_dir: demos/dashboard_demo/logs
   stop_on_failure: false
+  system_resources:
+    memory_interval_seconds: 30
+    disk_io_interval_seconds: 10
 
 jobs:
   - name: chromium-c-main

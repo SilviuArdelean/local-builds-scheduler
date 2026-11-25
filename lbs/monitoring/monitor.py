@@ -111,8 +111,13 @@ class SystemResourcesMonitor:
             self._next_memory_at = sampled_at + self._memory_interval
 
         if self.disk_io_enabled and sampled_at >= self._next_disk_io_at:
-            self._sample_disk_io(sampled_at)
-            self._next_disk_io_at = sampled_at + self._disk_io_interval
+            sample = self._sample_disk_io(sampled_at)
+            # Disk I/O rates need a baseline first; warm up quickly so values appear
+            # in ~1 tick rather than waiting a full interval.
+            if not sample.available and sample.error == "collecting baseline":
+                self._next_disk_io_at = sampled_at + min(self._disk_io_interval, 1.0)
+            else:
+                self._next_disk_io_at = sampled_at + self._disk_io_interval
 
         if sampled_at >= self._next_disk_free_at:
             self._sample_disk_free(sampled_at)
@@ -142,7 +147,7 @@ class SystemResourcesMonitor:
             )
         self._snapshot = replace(self._snapshot, memory=sample)
 
-    def _sample_disk_io(self, now: float) -> None:
+    def _sample_disk_io(self, now: float) -> DiskIoSample:
         try:
             sample = self._disk_io_collector.sample(now)
         except (AttributeError, TypeError, ValueError, OSError, RuntimeError) as exc:
@@ -152,6 +157,7 @@ class SystemResourcesMonitor:
                 error=str(exc) or "disk I/O error",
             )
         self._snapshot = replace(self._snapshot, disk_io=sample)
+        return sample
 
     def _sample_disk_free(self, now: float) -> None:
         try:

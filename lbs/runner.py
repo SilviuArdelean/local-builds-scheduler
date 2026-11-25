@@ -1621,6 +1621,7 @@ class _QueueProgressReporter:
             if term_lines < self.viewport.min_terminal_lines:
                 return
 
+            self._poll_resource_monitor()
             initial_rows = self._render_dashboard_rows(term_cols, term_lines)
             if not self.viewport.enable(initial_height=len(initial_rows)):
                 return

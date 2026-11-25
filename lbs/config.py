@@ -72,8 +72,8 @@ class SystemResourcesConfig:
 
     enabled: bool = True
     cpu_interval_seconds: float = 5.0
-    memory_interval_seconds: float = 10.0
-    disk_io_interval_seconds: float = 30.0
+    memory_interval_seconds: float = 30.0
+    disk_io_interval_seconds: float = 10.0
     disk_free_interval_seconds: float = 300.0
     disk_io_enabled: bool = True
 
@@ -627,8 +627,8 @@ def load_config(
     system_resources = SystemResourcesConfig(
         enabled=resources_dict.get("enabled", True),
         cpu_interval_seconds=resources_dict.get("cpu_interval_seconds", 5.0),
-        memory_interval_seconds=resources_dict.get("memory_interval_seconds", 10.0),
-        disk_io_interval_seconds=resources_dict.get("disk_io_interval_seconds", 30.0),
+        memory_interval_seconds=resources_dict.get("memory_interval_seconds", 30.0),
+        disk_io_interval_seconds=resources_dict.get("disk_io_interval_seconds", 10.0),
         disk_free_interval_seconds=resources_dict.get("disk_free_interval_seconds", 300.0),
         disk_io_enabled=resources_dict.get("disk_io_enabled", True),
     )

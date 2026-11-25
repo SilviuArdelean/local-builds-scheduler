@@ -145,8 +145,8 @@ settings:
   system_resources:             # Default: enabled with standard intervals
     enabled: true
     cpu_interval_seconds: 5
-    memory_interval_seconds: 10
-    disk_io_interval_seconds: 30
+    memory_interval_seconds: 30
+    disk_io_interval_seconds: 10
     disk_free_interval_seconds: 300
     disk_io_enabled: true
   notifications:                # Default: empty (disabled)

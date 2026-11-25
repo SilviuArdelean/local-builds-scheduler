@@ -1594,6 +1594,43 @@ def test_queue_progress_reporter_ticker_polls_resource_monitor_for_split_dashboa
     assert monitor.poll_calls > 0
 
 
+def test_queue_progress_reporter_enable_split_screen_polls_resource_monitor_before_first_paint():
+    """Initial split-screen paint should include first resource sample."""
+    import io
+    from lbs.runner import _QueueProgressReporter
+
+    class _FakeResourceMonitor:
+        def __init__(self):
+            self.poll_calls = 0
+
+        def poll(self):
+            self.poll_calls += 1
+            from lbs.monitoring.models import SystemResourcesSnapshot
+            return SystemResourcesSnapshot()
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            return None
+
+    monitor = _FakeResourceMonitor()
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=monitor,
+    )
+
+    reporter.enable_split_screen()
+
+    assert monitor.poll_calls == 1
+
+
 def test_queue_progress_reporter_build_snapshot_contains_resource_snapshot():
     """Dashboard snapshot should carry current resource snapshot from monitor."""
     import io

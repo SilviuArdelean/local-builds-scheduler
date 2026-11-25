@@ -388,8 +388,8 @@ class DashboardRenderer:
         else:
             memory_value = "N/A"
         disk_io_value = (
-            f"R {format_bytes_rate_iec(disk_io.read_bytes_per_second)} "
-            f"W {format_bytes_rate_iec(disk_io.write_bytes_per_second)}"
+            f"R: {format_bytes_rate_iec(disk_io.read_bytes_per_second)}"
+            f"  W: {format_bytes_rate_iec(disk_io.write_bytes_per_second)}"
             if disk_io.available
             else "N/A"
         )

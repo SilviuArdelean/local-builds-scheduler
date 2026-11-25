@@ -160,6 +160,7 @@ def test_full_layout_contains_all_btop_sections_and_truecolor_palette():
     assert "84%" in plain
     assert "61 GiB" in plain
     assert "25.2 MiB/s" in plain
+    assert "R:" in plain
     assert "420 GiB" in plain
 
     jobs_border_row = next(line for line in plain_lines if ("PASS" in line or "PASSED" in line))
@@ -211,6 +212,16 @@ def test_unavailable_build_progress_does_not_fabricate_percentage():
     assert "Step 2 of 4" in plain
     assert "68.5%" not in plain
     assert "● SYNC" in plain
+
+
+def test_full_layout_disk_io_uses_read_write_separator_when_space_allows():
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    lines = renderer.render(snap, width=140, height=34)
+    plain = "\n".join(_strip_ansi(line) for line in lines)
+
+    assert "R:" in plain
+    assert "  W:" in plain
 
 
 def test_stats_values_render_inline_with_double_space_separator():

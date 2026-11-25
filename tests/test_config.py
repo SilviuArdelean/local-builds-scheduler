@@ -868,8 +868,8 @@ def test_settings_default_system_resources():
     resources = settings.system_resources
     assert resources.enabled is True
     assert resources.cpu_interval_seconds == 5.0
-    assert resources.memory_interval_seconds == 10.0
-    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.memory_interval_seconds == 30.0
+    assert resources.disk_io_interval_seconds == 10.0
     assert resources.disk_free_interval_seconds == 300.0
     assert resources.disk_io_enabled is True
 
@@ -890,8 +890,8 @@ def test_config_system_resources_defaults(tmp_path):
     resources = config.settings.system_resources
     assert resources.enabled is True
     assert resources.cpu_interval_seconds == 5.0
-    assert resources.memory_interval_seconds == 10.0
-    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.memory_interval_seconds == 30.0
+    assert resources.disk_io_interval_seconds == 10.0
     assert resources.disk_free_interval_seconds == 300.0
     assert resources.disk_io_enabled is True
 
@@ -917,8 +917,8 @@ def test_config_system_resources_partial_override(tmp_path):
     resources = config.settings.system_resources
     assert resources.enabled is False
     assert resources.cpu_interval_seconds == 7
-    assert resources.memory_interval_seconds == 10.0
-    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.memory_interval_seconds == 30.0
+    assert resources.disk_io_interval_seconds == 10.0
     assert resources.disk_free_interval_seconds == 300.0
     assert resources.disk_io_enabled is False
 
