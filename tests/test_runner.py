@@ -1576,6 +1576,61 @@ def test_scheduler_btop_dashboard_keeps_log_files_free_of_ansi_and_borders(tmp_p
     assert "[20/20] 0m02.20s F LINK chrome.exe" in job_log_text
 
 
+def test_queue_progress_reporter_non_split_ansi_tty_renders_colorized_milestone_card():
+    """On an ANSI TTY with split-screen unavailable, render colorized btop milestone cards without DECSTBM."""
+    import io
+    import re
+    import time
+    from unittest.mock import patch
+    from lbs.runner import _QueueProgressReporter, CommandTask
+    from lbs.ui import TerminalCapabilities
+
+    stream = io.StringIO()
+    non_split_caps = TerminalCapabilities(
+        is_tty=True,
+        use_ansi=True,
+        color_system="truecolor",
+        use_unicode=True,
+        supports_split_screen=False,
+        supports_osc_title=True,
+    )
+    with (
+        patch("lbs.runner.detect_capabilities", return_value=non_split_caps),
+        patch("shutil.get_terminal_size", return_value=os.terminal_size((90, 30))),
+    ):
+        reporter = _QueueProgressReporter(
+            total_jobs=2,
+            total_commands=2,
+            session_start_time=time.perf_counter(),
+            is_quiet=False,
+            stream=stream,
+            force_tty=True,
+            enable_ticker=False,
+        )
+        reporter.enable_split_screen()
+        assert reporter.split_active is False
+
+        job = Job(name="asb-d-main", cwd=".")
+        tasks = [CommandTask(index=0, phase="build", command="python3 build.py --debug")]
+        reporter.start_phase(
+            job=job,
+            phase_name="build",
+            cmds_to_run_tasks=tasks,
+            log_path=r"logs\asb-d-main_build.log",
+            job_idx=1,
+        )
+
+    raw = stream.getvalue()
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)
+    # No DECSTBM scroll region sequence emitted
+    assert ";30r" not in raw
+    # Renders colorized btop compact milestone panel instead of bare monochrome divider
+    assert "\x1b[" in raw
+    assert "LOCAL BUILDS SCHEDULER" in plain
+    assert "asb-d-main" in plain
+    assert "LIVE COMPILER OUTPUT" in plain
+
+
 
 
 

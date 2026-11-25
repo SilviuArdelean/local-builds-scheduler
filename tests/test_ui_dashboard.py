@@ -275,3 +275,23 @@ def test_render_plain_milestone_contains_expected_fields_without_ansi():
     assert "python3 build.py --shared --debug --ccache -t chrome" in text_ascii
     assert "00:43:16" in text_ascii
     assert r"logs\2026-11-11_asb-d-main_build.log" in text_ascii
+
+
+def test_render_milestone_card_outputs_colorized_compact_btop_panel():
+    """Verify render_milestone produces a colorized btop-styled card for non-split ANSI TTYs."""
+    renderer = DashboardRenderer()
+    snap = _sample_snapshot()
+    card = renderer.render_milestone(
+        snap,
+        width=84,
+        profile=RenderProfile(use_ansi=True, color_system="truecolor", use_unicode=True),
+    )
+
+    assert "\x1b[" in card
+    plain = _strip_ansi(card)
+    assert "╭" in plain and "╰" in plain
+    assert "LOCAL BUILDS SCHEDULER" in plain
+    assert "asb-d-main" in plain
+    assert "[BUILD]" in plain
+    assert "python3 build.py --shared --debug --ccache -t chrome" in plain
+    assert "LIVE COMPILER OUTPUT" in plain

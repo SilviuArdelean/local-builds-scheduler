@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 lbs.ui.terminal – Terminal capability detection, Windows VT enablement,
-and flicker-free DECSTBM split-screen viewport painting with row-level diffing.
+and flicker-free DECSTBM split-screen viewport painting.
 """
 
 from __future__ import annotations
@@ -161,7 +161,6 @@ def detect_capabilities(
     use_unicode = _stream_supports_unicode(target_stream)
     term = (env_map.get("TERM") or "").strip().lower()
     no_color = bool(env_map.get("NO_COLOR"))
-    is_cmder = bool(env_map.get("CMDER_ROOT") or env_map.get("ConEmuPID"))
 
     if not is_tty or term == "dumb":
         return TerminalCapabilities(
@@ -194,7 +193,7 @@ def detect_capabilities(
             use_ansi=False,
             color_system=None,
             use_unicode=use_unicode,
-            supports_split_screen=not is_cmder,
+            supports_split_screen=True,
             supports_osc_title=True,
         )
 
@@ -204,10 +203,7 @@ def detect_capabilities(
         use_ansi=color_system is not None,
         color_system=color_system,
         use_unicode=use_unicode,
-        # Cmder/ConEmu reflows DECSTBM-pinned rows inconsistently, especially
-        # during resize. Keep ANSI color/title support but use sequential
-        # milestones instead of the split-screen viewport there.
-        supports_split_screen=not is_cmder,
+        supports_split_screen=True,
         supports_osc_title=True,
     )
 
@@ -366,13 +362,7 @@ class SplitViewportManager:
             )
 
             if not geometry_changed:
-                changed_indices = [
-                    idx
-                    for idx, line in enumerate(visible_rows)
-                    if idx >= len(self._last_rendered_rows)
-                    or self._last_rendered_rows[idx] != line
-                ]
-                if not changed_indices:
+                if visible_rows == self._last_rendered_rows:
                     return False
 
                 parts = ["\033[?25l\033[?7l\0337"]

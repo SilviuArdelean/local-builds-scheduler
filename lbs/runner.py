@@ -1730,9 +1730,22 @@ class _QueueProgressReporter:
                 phase_name=phase_name,
                 log_path=str(log_path),
             )
-            self.stream.write(
-                render_plain_milestone(snapshot, use_unicode=self.capabilities.use_unicode)
-            )
+            if (
+                self.capabilities.is_tty
+                and self.capabilities.use_ansi
+                and not self.capabilities.supports_split_screen
+            ):
+                term_cols, _ = self.viewport.get_terminal_size()
+                milestone_text = self.renderer.render_milestone(
+                    snapshot,
+                    width=max(1, term_cols - 1),
+                    profile=self.capabilities,
+                )
+            else:
+                milestone_text = render_plain_milestone(
+                    snapshot, use_unicode=self.capabilities.use_unicode
+                )
+            self.stream.write(milestone_text)
             self.stream.flush()
 
     def start_phase(

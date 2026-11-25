@@ -670,6 +670,31 @@ class DashboardRenderer:
         console.print(renderable, end="")
         return buf.getvalue().splitlines()
 
+    def render_milestone(
+        self,
+        snapshot: DashboardSnapshot,
+        width: int,
+        profile: RenderProfileProtocol | None = None,
+        *,
+        use_ansi: bool = True,
+        color_system: ColorSystem = "truecolor",
+        use_unicode: bool = True,
+    ) -> str:
+        """Renders a compact, colorized single-shot milestone panel for ANSI TTYs
+        where DECSTBM split-screen is disabled (e.g. ConEmu/Cmder).
+        """
+        if profile is not None:
+            use_ansi = profile.use_ansi
+            color_system = profile.color_system
+            use_unicode = profile.use_unicode
+
+        safe_width = max(28, width)
+        use_color = bool(use_ansi and color_system is not None)
+        glyphs = get_glyphs(use_unicode)
+        renderable = self._build_compact(snapshot, safe_width, glyphs, use_color)
+        lines = self._render_to_lines(renderable, safe_width, use_ansi, color_system)
+        return "\n" + "\n".join(lines) + "\n"
+
     def render(
         self,
         snapshot: DashboardSnapshot,
