@@ -105,16 +105,23 @@ class JobExecutor:
             ):
                 print(f"[ERROR] {message}", file=sys.stderr)
 
-    @staticmethod
     def _notify_output_line(
+        self,
         on_output_line: Callable[[str], None] | None,
         text: str,
     ) -> None:
-        if on_output_line is not None and text:
+        """Invokes on_output_line once per physical line (preserving '\\n').
+
+        Exceptions raised by the callback are logged to stderr when verbose is
+        enabled, without failing command execution.
+        """
+        if on_output_line is None or not text:
+            return
+        for line in text.splitlines(keepends=True):
             try:
-                on_output_line(text)
-            except Exception:
-                pass
+                on_output_line(line)
+            except Exception as exc:
+                self._write_stderr_error(f"Output line callback failed: {exc}")
 
     def run_command(
         self,

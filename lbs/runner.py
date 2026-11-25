@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import atexit
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import datetime
 import hashlib
 import json
@@ -1478,10 +1478,6 @@ class _QueueProgressReporter:
     def split_active(self) -> bool:
         return self.viewport.active
 
-    @split_active.setter
-    def split_active(self, value: bool) -> None:
-        self.viewport.active = bool(value)
-
     @property
     def status_start(self) -> int:
         return self.viewport.status_start
@@ -1727,29 +1723,12 @@ class _QueueProgressReporter:
         with self.lock:
             if self.is_quiet or self.split_active:
                 return
-            snapshot = self._build_snapshot()
             # Ensure snapshot reflects explicit call arguments even if called directly
-            snapshot = DashboardSnapshot(
-                queue_percent=snapshot.queue_percent,
-                current_job_idx=snapshot.current_job_idx,
-                total_jobs=snapshot.total_jobs,
-                completed_commands=snapshot.completed_commands,
-                total_commands=snapshot.total_commands,
-                build_progress=snapshot.build_progress,
-                total_elapsed_seconds=snapshot.total_elapsed_seconds,
-                active_elapsed_seconds=snapshot.active_elapsed_seconds,
-                passed_jobs=snapshot.passed_jobs,
-                failed_jobs=snapshot.failed_jobs,
-                remaining_jobs=snapshot.remaining_jobs,
+            snapshot = replace(
+                self._build_snapshot(),
                 target_name=job.name,
                 phase_name=phase_name,
-                command_text=snapshot.command_text,
                 log_path=str(log_path),
-                cmd_idx=snapshot.cmd_idx,
-                phase_cmd_total=snapshot.phase_cmd_total,
-                status=snapshot.status,
-                retry_attempt=snapshot.retry_attempt,
-                max_retries=snapshot.max_retries,
             )
             self.stream.write(
                 render_plain_milestone(snapshot, use_unicode=self.capabilities.use_unicode)

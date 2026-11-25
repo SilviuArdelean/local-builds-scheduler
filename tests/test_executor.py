@@ -312,9 +312,32 @@ def test_executor_on_output_line_receives_sanitized_lines_in_order(tmp_path, cap
     assert capsys.readouterr().out == expected
 
 
-def test_executor_on_output_line_exception_does_not_break_execution(tmp_path):
-    """Verify errors inside on_output_line are isolated and never fail the command."""
+def test_executor_on_output_line_splits_cr_normalized_chunks_per_line(tmp_path):
+    """Verify CR->LF normalized chunks invoke on_output_line once per physical line."""
     executor = JobExecutor(verbose=False)
+    log_file = io.StringIO()
+    received: list[str] = []
+
+    py_cmd = (
+        f'"{sys.executable}" -c "import sys; '
+        r"sys.stdout.buffer.write(b'[1/3] a\r[2/3] b\r[3/3] c\r\n'); "
+        'sys.stdout.buffer.flush()"'
+    )
+
+    result = executor.run_command(
+        py_cmd,
+        cwd=str(tmp_path),
+        log_file=log_file,
+        on_output_line=received.append,
+    )
+
+    assert result.success is True
+    assert received == ["[1/3] a\n", "[2/3] b\n", "[3/3] c\n"]
+
+
+def test_executor_on_output_line_exception_does_not_break_execution(tmp_path, capsys):
+    """Verify errors inside on_output_line are isolated, logged in verbose mode, and never fail the command."""
+    executor_quiet = JobExecutor(verbose=False)
     log_file = io.StringIO()
     calls = 0
 
@@ -324,7 +347,7 @@ def test_executor_on_output_line_exception_does_not_break_execution(tmp_path):
         raise RuntimeError("parser bug")
 
     py_cmd = f'"{sys.executable}" -c "print(\'line-1\'); print(\'line-2\')"'
-    result = executor.run_command(
+    result = executor_quiet.run_command(
         py_cmd,
         cwd=str(tmp_path),
         log_file=log_file,
@@ -333,9 +356,22 @@ def test_executor_on_output_line_exception_does_not_break_execution(tmp_path):
 
     assert result.success is True
     assert result.exit_code == 0
-    assert calls >= 1
+    assert calls == 2
     assert "line-1" in log_file.getvalue()
     assert "line-2" in log_file.getvalue()
+    assert capsys.readouterr().err == ""
+
+    # In verbose mode, callback exceptions are surfaced on stderr without failing execution
+    executor_verbose = JobExecutor(verbose=True)
+    log_file_v = io.StringIO()
+    result_v = executor_verbose.run_command(
+        py_cmd,
+        cwd=str(tmp_path),
+        log_file=log_file_v,
+        on_output_line=flaky_callback,
+    )
+    assert result_v.success is True
+    assert "[ERROR] Output line callback failed: parser bug" in capsys.readouterr().err
 
 
 
