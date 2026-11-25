@@ -78,6 +78,16 @@ lbs --version
 > or bypass it for a single session with `powershell -ExecutionPolicy Bypass -File .venv\Scripts\Activate.ps1`.
 > You can also skip activation entirely and call the venv's exe directly: `.venv\Scripts\lbs.exe --version`.
 
+### Troubleshooting the Installation
+
+| Symptom | Cause | Fix |
+| :--- | :--- | :--- |
+| `ERROR: Package 'lbs' requires a different Python: 3.10.x not in '>=3.11'` | The `.venv` was created with an older Python. | List installed versions with `py -0`, then recreate the venv with a supported one: `deactivate`, delete `.venv`, `py -3.12 -m venv .venv`, activate, `python -m pip install -e .`. Running `py -3.12 -m venv .venv` over an existing venv does not replace it, so delete the folder first. |
+| `ModuleNotFoundError: No module named 'rich'` (or another dependency) | The `lbs` being run is not the venv's. Either `pip install -e .` never completed in the venv, or it was run before the dependency was added, for example after a `git pull`. | Re-run `python -m pip install -e .` inside the activated venv. |
+| `where lbs` lists a path outside `.venv` (e.g. `...\Python312\Scripts\lbs.exe`) | A stale global install shadows the venv. This happens when `pip install -e .` was once run without an active venv, or when the venv has no `lbs.exe` yet. | Install into the venv with `python -m pip install -e .` (this guarantees the venv's interpreter is used), then check that `where lbs` lists `.venv\Scripts\lbs.exe` first. Optionally remove the global copy from outside the venv: `py -3.12 -m pip uninstall lbs`. |
+
+> **Tip**: use `python -m pip` instead of bare `pip`, and check `python --version` / `where python` after activating. Both confirm that you are really inside the venv.
+
 ---
 
 ## 3. Configuring Your First Build YAML File

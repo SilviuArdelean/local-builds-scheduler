@@ -275,6 +275,8 @@ Every command below assumes an active venv in your current shell — this doesn'
 
 If `lbs` isn't found afterwards, activation likely failed silently (see the PowerShell execution-policy gotcha in the [Kickstart Guide](docs/kickstart.md)) — you can always bypass it and call the venv's `lbs` directly: `.venv\Scripts\lbs.exe --version`.
 
+If `where lbs` points outside `.venv`, or you get `ModuleNotFoundError` / `requires a different Python` errors, see [Troubleshooting the Installation](docs/kickstart.md#troubleshooting-the-installation).
+
 ### 1. See what actually happened — don't guess
 
 ```bash
