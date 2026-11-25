@@ -1665,6 +1665,46 @@ def test_queue_progress_reporter_build_snapshot_contains_resource_snapshot():
     assert snapshot.system_resources.cpu.value == 37.5
 
 
+def test_queue_progress_reporter_poll_failure_clears_stale_resource_snapshot():
+    """Polling errors should replace stale metrics with unavailable samples."""
+    import io
+    from lbs.monitoring.models import PercentSample, SystemResourcesSnapshot
+    from lbs.runner import _QueueProgressReporter
+
+    class _FailingResourceMonitor:
+        def poll(self):
+            raise RuntimeError("psutil runtime error")
+
+        def set_workspace(self, workspace):
+            return None
+
+        def close(self):
+            return None
+
+    reporter = _QueueProgressReporter(
+        total_jobs=1,
+        total_commands=1,
+        session_start_time=100.0,
+        is_quiet=False,
+        stream=io.StringIO(),
+        force_tty=True,
+        enable_ticker=False,
+        resource_monitor=_FailingResourceMonitor(),
+    )
+    reporter._resource_snapshot = SystemResourcesSnapshot(
+        cpu=PercentSample(available=True, value=80.0, sampled_at=1.0)
+    )
+
+    reporter._poll_resource_monitor()
+
+    snapshot = reporter._build_snapshot().system_resources
+    assert snapshot.cpu.available is False
+    assert snapshot.memory.available is False
+    assert snapshot.disk_io.available is False
+    assert snapshot.disk_free.available is False
+    assert snapshot.cpu.error is not None and "poll failed:" in snapshot.cpu.error
+
+
 def test_queue_progress_reporter_finish_closes_resource_monitor():
     """Finishing the reporter should close and clear the resource monitor."""
     import io

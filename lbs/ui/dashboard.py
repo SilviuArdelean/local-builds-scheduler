@@ -860,8 +860,8 @@ class DashboardRenderer:
             else "N/A"
         )
         io_value = (
-            f"{format_bytes_rate_iec(resources.disk_io.read_bytes_per_second)}"
-            f"/{format_bytes_rate_iec(resources.disk_io.write_bytes_per_second)}"
+            f"R: {format_bytes_rate_iec(resources.disk_io.read_bytes_per_second)}"
+            f"  W: {format_bytes_rate_iec(resources.disk_io.write_bytes_per_second)}"
             if resources.disk_io.available
             else "N/A"
         )

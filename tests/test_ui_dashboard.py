@@ -259,6 +259,8 @@ def test_compact_layout_includes_resource_summary_when_available():
     assert "RES CPU" in plain
     assert "RAM" in plain
     assert "IO" in plain
+    assert "R: 25.2 MiB/s  W: 8.4 MiB/s" in plain
+    assert "/s/" not in plain
     assert "FREE" in plain
     assert "LIVE COMPILER OUTPUT" in plain
 

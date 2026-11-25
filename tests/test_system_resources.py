@@ -330,3 +330,12 @@ def test_system_resources_monitor_warms_up_disk_io_baseline_within_one_second():
     assert warmed.disk_io.read_bytes_per_second == 11.0
     assert warmed.disk_io.write_bytes_per_second == 7.0
     assert disk_io_calls["count"] == 2
+
+
+def test_system_resources_monitor_defaults_match_config_defaults():
+    monitor = SystemResourcesMonitor()
+
+    assert monitor._cpu_interval == 5.0
+    assert monitor._memory_interval == 30.0
+    assert monitor._disk_io_interval == 10.0
+    assert monitor._disk_free_interval == 300.0

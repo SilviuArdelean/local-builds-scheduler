@@ -24,7 +24,13 @@ import time
 
 from lbs.config import Config, Job, BuildStatus, resolve_status_path, load_config
 from lbs.monitoring import SystemResourcesMonitor
-from lbs.monitoring.models import SystemResourcesSnapshot
+from lbs.monitoring.models import (
+    DiskFreeSample,
+    DiskIoSample,
+    MemorySample,
+    PercentSample,
+    SystemResourcesSnapshot,
+)
 from lbs.ui import (
     BuildProgress,
     BuildProgressParser,
@@ -1648,8 +1654,31 @@ class _QueueProgressReporter:
             return
         try:
             self._resource_snapshot = self._resource_monitor.poll()
-        except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
-            pass
+        except (AttributeError, TypeError, ValueError, OSError, RuntimeError) as exc:
+            error = str(exc).strip() or exc.__class__.__name__
+            sampled_at = time.perf_counter()
+            self._resource_snapshot = SystemResourcesSnapshot(
+                cpu=PercentSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                memory=MemorySample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                disk_io=DiskIoSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+                disk_free=DiskFreeSample(
+                    available=False,
+                    sampled_at=sampled_at,
+                    error=f"poll failed: {error}",
+                ),
+            )
 
     def _get_elapsed_str(self) -> str:
         elapsed = int(max(0.0, time.perf_counter() - self.session_start_time))
