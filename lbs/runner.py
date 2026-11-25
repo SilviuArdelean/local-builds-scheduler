@@ -1204,10 +1204,11 @@ def _run_single_job(
         else:
             if attempt < total_attempts:
                 if tasks:
-                    setup_cmds = set(job.resume_setup_commands)
                     for t in tasks:
-                        if t.status == BuildStatus.FAILED or (
-                            t.status == BuildStatus.DONE and t.command in setup_cmds
+                        if t.status in (
+                            BuildStatus.FAILED,
+                            BuildStatus.DONE,
+                            BuildStatus.RUNNING,
                         ):
                             t.status = BuildStatus.PENDING
                             t.exit_code = None

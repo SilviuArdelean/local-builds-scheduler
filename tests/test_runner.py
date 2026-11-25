@@ -1707,6 +1707,42 @@ def test_retry_setup_failure_on_second_attempt_attributed_to_setup_not_dependent
     assert cmds[1]["status"] == "PENDING"
 
 
+def test_retry_previously_done_ordinary_command_failing_on_retry_is_attributed_correctly(tmp_path):
+    """Verify that if an ordinary (non-setup) command succeeds on attempt 1 (while cmd 2 fails),
+    and then cmd 1 fails on attempt 2, FAILED is attributed to cmd 1 and cmd 2 stays PENDING.
+    """
+    import json
+    log_dir = tmp_path / "logs"
+    cmd1_counter = tmp_path / "cmd1_n.txt"
+
+    # Ordinary cmd1 succeeds on attempt 1, fails with exit code 9 on attempt 2
+    cmd1 = (
+        f'"{sys.executable}" -c '
+        f'"import os, sys; '
+        f"p = r'{cmd1_counter.as_posix()}'; "
+        f"n = int(open(p).read()) + 1 if os.path.exists(p) else 1; "
+        f"open(p, 'w').write(str(n)); "
+        f'sys.exit(0 if n == 1 else 9)"'
+    )
+    cmd2 = f'"{sys.executable}" -c "import sys; sys.exit(1)"'
+
+    job = Job(
+        name="retry-ordinary-fail-2nd",
+        cwd=str(tmp_path),
+        commands=[cmd1, cmd2],
+        retries=1,
+        retry_delay_seconds=0.01,
+    )
+    config = Config(settings=Settings(log_dir=str(log_dir)), jobs=[job])
+    assert run_scheduler(config) is False
+
+    status_data = json.loads((log_dir / "lbs_status.json").read_text(encoding="utf-8"))
+    cmds = status_data["jobs"]["retry-ordinary-fail-2nd"]["commands"]
+    assert cmds[0]["status"] == "FAILED"
+    assert cmds[0]["exit_code"] == 9
+    assert cmds[1]["status"] == "PENDING"
+
+
 def test_progress_monitor_and_reconcile_with_replayed_setup_task(tmp_path):
     """Verify _JobProgressMonitor and _reconcile_attempt_failure handle replayed setup tasks accurately."""
     from lbs.runner import _JobProgressMonitor, _reconcile_attempt_failure
