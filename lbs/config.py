@@ -67,6 +67,18 @@ class NotificationsConfig:
 
 
 @dataclass
+class SystemResourcesConfig:
+    """Configuration settings for dashboard system resource monitoring."""
+
+    enabled: bool = True
+    cpu_interval_seconds: float = 5.0
+    memory_interval_seconds: float = 10.0
+    disk_io_interval_seconds: float = 30.0
+    disk_free_interval_seconds: float = 300.0
+    disk_io_enabled: bool = True
+
+
+@dataclass
 class Settings:
     """Global scheduler settings."""
     stop_on_failure: bool = False
@@ -75,6 +87,8 @@ class Settings:
     quiet: bool = False
     notifications: NotificationsConfig = field(
         default_factory=NotificationsConfig)
+    system_resources: SystemResourcesConfig = field(
+        default_factory=SystemResourcesConfig)
 
 
 @dataclass
@@ -359,6 +373,34 @@ def _validate_notifications(notif_data: dict) -> None:
             _validate_email_config(email_data)
 
 
+def _validate_system_resources_config(resources_data: dict) -> None:
+    if not isinstance(resources_data, dict):
+        raise ConfigError("'system_resources' setting must be a dictionary")
+
+    for key in ["enabled", "disk_io_enabled"]:
+        if key in resources_data and not isinstance(resources_data[key], bool):
+            raise ConfigError(f"'{key}' system_resources setting must be a boolean")
+
+    for key in [
+        "cpu_interval_seconds",
+        "memory_interval_seconds",
+        "disk_io_interval_seconds",
+        "disk_free_interval_seconds",
+    ]:
+        if key not in resources_data:
+            continue
+        val = resources_data[key]
+        if (
+            not isinstance(val, (int, float))
+            or isinstance(val, bool)
+            or not math.isfinite(val)
+            or val <= 0
+        ):
+            raise ConfigError(
+                f"'{key}' system_resources setting must be a positive finite number"
+            )
+
+
 def _validate_settings(settings_data: dict) -> None:
     if not isinstance(settings_data, dict):
         raise ConfigError("'settings' section must be a dictionary")
@@ -382,6 +424,9 @@ def _validate_settings(settings_data: dict) -> None:
 
     if "notifications" in settings_data:
         _validate_notifications(settings_data["notifications"])
+
+    if "system_resources" in settings_data:
+        _validate_system_resources_config(settings_data["system_resources"])
 
 
 def _expand_env_vars(val):
@@ -576,6 +621,18 @@ def load_config(
         discord_webhook=notif_dict.get("discord_webhook", None),
         email=email_config)
 
+    resources_dict = settings_dict.get("system_resources")
+    if resources_dict is None:
+        resources_dict = {}
+    system_resources = SystemResourcesConfig(
+        enabled=resources_dict.get("enabled", True),
+        cpu_interval_seconds=resources_dict.get("cpu_interval_seconds", 5.0),
+        memory_interval_seconds=resources_dict.get("memory_interval_seconds", 10.0),
+        disk_io_interval_seconds=resources_dict.get("disk_io_interval_seconds", 30.0),
+        disk_free_interval_seconds=resources_dict.get("disk_free_interval_seconds", 300.0),
+        disk_io_enabled=resources_dict.get("disk_io_enabled", True),
+    )
+
     quiet_val = settings_dict.get("quiet", False)
     if quiet_val:
         verbose_val = False
@@ -588,6 +645,7 @@ def load_config(
         verbose=verbose_val,
         quiet=quiet_val,
         notifications=notifications,
+        system_resources=system_resources,
     )
 
     # Construct Job dataclasses

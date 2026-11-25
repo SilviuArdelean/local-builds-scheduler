@@ -860,6 +860,129 @@ def test_config_invalid_quiet_type(tmp_path):
     assert "'quiet' setting must be a boolean" in str(exc.value)
 
 
+def test_settings_default_system_resources():
+    """Settings dataclass should include default system resource config values."""
+    from lbs.config import Settings
+
+    settings = Settings()
+    resources = settings.system_resources
+    assert resources.enabled is True
+    assert resources.cpu_interval_seconds == 5.0
+    assert resources.memory_interval_seconds == 10.0
+    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.disk_free_interval_seconds == 300.0
+    assert resources.disk_io_enabled is True
+
+
+def test_config_system_resources_defaults(tmp_path):
+    """When omitted, system_resources should load with default values."""
+    config_file = tmp_path / "system_resources_defaults.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    config = load_config(config_file)
+    resources = config.settings.system_resources
+    assert resources.enabled is True
+    assert resources.cpu_interval_seconds == 5.0
+    assert resources.memory_interval_seconds == 10.0
+    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.disk_free_interval_seconds == 300.0
+    assert resources.disk_io_enabled is True
+
+
+def test_config_system_resources_partial_override(tmp_path):
+    """Specified system_resources keys should override only those defaults."""
+    config_file = tmp_path / "system_resources_partial.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      system_resources:
+        enabled: false
+        cpu_interval_seconds: 7
+        disk_io_enabled: false
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    config = load_config(config_file)
+    resources = config.settings.system_resources
+    assert resources.enabled is False
+    assert resources.cpu_interval_seconds == 7
+    assert resources.memory_interval_seconds == 10.0
+    assert resources.disk_io_interval_seconds == 30.0
+    assert resources.disk_free_interval_seconds == 300.0
+    assert resources.disk_io_enabled is False
+
+
+def test_config_system_resources_must_be_dictionary(tmp_path):
+    """A non-dictionary system_resources setting should raise ConfigError."""
+    config_file = tmp_path / "system_resources_invalid_type.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      system_resources: true
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file)
+    assert "'system_resources' setting must be a dictionary" in str(exc.value)
+
+
+def test_config_system_resources_boolean_fields_validation(tmp_path):
+    """Invalid boolean values in system_resources should raise ConfigError."""
+    config_file = tmp_path / "system_resources_bad_bool.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      system_resources:
+        enabled: "yes"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file)
+    assert "'enabled' system_resources setting must be a boolean" in str(exc.value)
+
+
+def test_config_system_resources_interval_validation(tmp_path):
+    """Invalid system_resources intervals should raise ConfigError."""
+    config_file = tmp_path / "system_resources_bad_interval.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config_file.write_text(f"""
+    settings:
+      system_resources:
+        cpu_interval_seconds: 0
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_file)
+    assert "'cpu_interval_seconds' system_resources setting must be a positive finite number" in str(
+        exc.value
+    )
+
 def test_build_status_enum():
     """Verify BuildStatus enum members, string conversion, and equality."""
     assert BuildStatus.PENDING == "PENDING"
