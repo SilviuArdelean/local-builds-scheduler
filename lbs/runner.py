@@ -42,6 +42,11 @@ from lbs.ui import (
     detect_capabilities,
     render_plain_milestone,
 )
+from lbs.utils.deps import (
+    find_missing_dependencies,
+    format_dependency_issue,
+    resolve_ignored_dependencies,
+)
 from lbs.utils.executor import JobExecutor
 from lbs.utils.lock import FileLock
 from lbs.utils.sanitizer import sanitize_console_output
@@ -2417,7 +2422,16 @@ class Scheduler:
                 )
                 return True
 
+        dependency_warnings = [
+            format_dependency_issue(issue)
+            for issue in find_missing_dependencies(
+                ignored=resolve_ignored_dependencies(config),
+            )
+        ]
+
         if dry_run:
+            for warning_msg in dependency_warnings:
+                print(warning_msg, file=sys.stderr)
             _print_dry_run_plan(
                 config=config,
                 jobs_to_run=jobs_to_run,
@@ -2477,6 +2491,8 @@ class Scheduler:
             log_to_session(
                 f"Settings: stop_on_failure={config.settings.stop_on_failure}, log_dir={config.settings.log_dir}"
             )
+            for warning_msg in dependency_warnings:
+                log_to_session(warning_msg)
 
             # Save initial state if not resuming
             if resume != "latest":
@@ -2522,6 +2538,15 @@ class Scheduler:
                 resource_config=getattr(config.settings, "system_resources", None),
             )
             progress_reporter.enable_split_screen()
+            if dependency_warnings:
+                if progress_reporter.split_active:
+                    with progress_reporter.lock:
+                        for warning_msg in dependency_warnings:
+                            progress_reporter.stream.write(f"{warning_msg}\n")
+                        progress_reporter.stream.flush()
+                else:
+                    for warning_msg in dependency_warnings:
+                        print(warning_msg, file=sys.stderr)
 
             current_phase_header = None
             active_job = None

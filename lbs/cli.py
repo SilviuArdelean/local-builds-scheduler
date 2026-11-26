@@ -11,14 +11,42 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-from lbs import __version__, Scheduler, clean_session_state
-from lbs.config import load_config, resolve_status_path, Config, ConfigError
+from lbs import __version__
+from lbs.utils.deps import (
+    find_missing_dependencies,
+    format_dependency_issue,
+    format_startup_dependency_report,
+    resolve_ignored_dependencies,
+)
 from lbs.utils.lock import FileLock, LockError
+
+_MISSING_DEPENDENCY_ERROR: ModuleNotFoundError | None = None
+
+
+def _is_internal_module_error(exc: ModuleNotFoundError) -> bool:
+    """Returns True if the missing module belongs to the internal lbs package."""
+    name = (exc.name or "").strip()
+    return name == "lbs" or name.startswith("lbs.")
+
+
+try:
+    from lbs import Scheduler, clean_session_state
+    from lbs.config import Config, ConfigError, load_config, resolve_status_path
+except ModuleNotFoundError as exc:
+    if _is_internal_module_error(exc):
+        raise
+    _MISSING_DEPENDENCY_ERROR = exc
+    Scheduler = None  # type: ignore[assignment]
+    clean_session_state = None  # type: ignore[assignment]
+    Config = None  # type: ignore[assignment,misc]
+    ConfigError = Exception  # type: ignore[assignment,misc]
+    load_config = None  # type: ignore[assignment]
+    resolve_status_path = None  # type: ignore[assignment]
 
 
 def _cancel_os_shutdown(abort_cmd: list[str]) -> None:
@@ -274,9 +302,14 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_validate(args: argparse.Namespace) -> None:
     """Handle the 'lbs validate <config>' subcommand."""
     try:
-        load_config(args.config,
-                    notifications_path=getattr(args, "notifications_config",
-                                               None))
+        config = load_config(
+            args.config,
+            notifications_path=getattr(args, "notifications_config", None),
+        )
+        for issue in find_missing_dependencies(
+            ignored=resolve_ignored_dependencies(config),
+        ):
+            print(format_dependency_issue(issue), file=sys.stderr)
         print("Configuration is valid.")
         sys.exit(0)
     except ConfigError as e:
@@ -477,7 +510,21 @@ def main() -> None:
     """Main entry point for the lbs CLI."""
     parser = build_parser()
     args = parser.parse_args()
+    if _MISSING_DEPENDENCY_ERROR is not None:
+        missing_name = (
+            _MISSING_DEPENDENCY_ERROR.name or str(_MISSING_DEPENDENCY_ERROR)
+        )
+        for line in format_startup_dependency_report(missing_name):
+            print(line, file=sys.stderr)
+        sys.exit(2)
     try:
         args.func(args)
+    except ModuleNotFoundError as e:
+        if _is_internal_module_error(e):
+            raise
+        missing_name = e.name or str(e)
+        for line in format_startup_dependency_report(missing_name):
+            print(line, file=sys.stderr)
+        sys.exit(2)
     except KeyboardInterrupt:
         sys.exit(130)

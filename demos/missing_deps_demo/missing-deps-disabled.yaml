@@ -1,0 +1,14 @@
+# Demo config with system_resources.enabled: false to show psutil warning suppression.
+# Run from the repository root:
+#   python demos\missing_deps_demo\run_demo.py psutil-disabled
+settings:
+  log_dir: demos/missing_deps_demo/logs
+  stop_on_failure: false
+  system_resources:
+    enabled: false
+
+jobs:
+  - name: demo-build
+    cwd: demos/missing_deps_demo
+    commands:
+      - python -c "print('Build step completed without psutil warning.')"
