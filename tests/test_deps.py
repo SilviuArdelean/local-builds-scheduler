@@ -290,6 +290,7 @@ def test_cli_missing_hard_dependency_exits_cleanly_without_traceback(
         capture_output=True,
         text=True,
         check=False,
+        timeout=15,
     )
     assert ver_proc.returncode == 0
     assert ver_proc.stdout.strip().startswith("lbs ")
@@ -300,6 +301,7 @@ def test_cli_missing_hard_dependency_exits_cleanly_without_traceback(
         capture_output=True,
         text=True,
         check=False,
+        timeout=15,
     )
     assert val_proc.returncode == 2
     assert "Traceback" not in val_proc.stderr
@@ -672,3 +674,65 @@ dependencies = [
             f"CPU, RAM, and Disk I/O metrics will show as N/A. {INSTALL_HINT}"
         ),
     ]
+
+
+def test_cli_reraises_internal_lbs_module_not_found_error() -> None:
+    """Missing internal lbs.* modules must propagate rather than be masked."""
+    import lbs.cli
+
+    def raise_internal(_args) -> None:
+        raise ModuleNotFoundError(
+            "No module named 'lbs.missing_internal'",
+            name="lbs.missing_internal",
+        )
+
+    fake_args = SimpleNamespace(func=raise_internal)
+    with (
+        patch.object(lbs.cli, "build_parser") as mock_parser,
+        pytest.raises(ModuleNotFoundError, match="lbs.missing_internal"),
+    ):
+        mock_parser.return_value.parse_args.return_value = fake_args
+        lbs.cli.main()
+
+
+def test_find_missing_dependencies_assigns_severity_by_policy(tmp_path) -> None:
+    from lbs.utils.deps import MANDATORY_IMPACT, format_dependency_issue
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        """
+[project]
+name = "lbs"
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "psutil>=5.9",
+]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    issues = find_missing_dependencies(
+        pyproject_path=pyproject,
+        is_installed_fn=lambda name: normalize_dist_name(name) == "rich",
+    )
+    assert issues == [
+        DependencyIssue(
+            package="pyyaml",
+            normalized="pyyaml",
+            severity="error",
+            impact=MANDATORY_IMPACT,
+        ),
+        DependencyIssue(
+            package="psutil",
+            normalized="psutil",
+            severity="warning",
+            impact="CPU, RAM, and Disk I/O metrics will show as N/A",
+        ),
+    ]
+    assert format_dependency_issue(issues[0]) == (
+        f"Error: Missing required dependency 'pyyaml'. {INSTALL_HINT}"
+    )
+    assert format_dependency_issue(issues[1]).startswith(
+        "[WARNING] Missing dependency 'psutil':"
+    )

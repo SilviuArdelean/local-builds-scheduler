@@ -44,7 +44,7 @@ from lbs.ui import (
 )
 from lbs.utils.deps import (
     find_missing_dependencies,
-    format_dependency_warning,
+    format_dependency_issue,
     resolve_ignored_dependencies,
 )
 from lbs.utils.executor import JobExecutor
@@ -2423,7 +2423,7 @@ class Scheduler:
                 return True
 
         dependency_warnings = [
-            format_dependency_warning(issue)
+            format_dependency_issue(issue)
             for issue in find_missing_dependencies(
                 ignored=resolve_ignored_dependencies(config),
             )

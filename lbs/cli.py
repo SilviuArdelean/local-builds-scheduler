@@ -19,7 +19,7 @@ from pathlib import Path
 from lbs import __version__
 from lbs.utils.deps import (
     find_missing_dependencies,
-    format_dependency_warning,
+    format_dependency_issue,
     format_startup_dependency_report,
     resolve_ignored_dependencies,
 )
@@ -27,10 +27,19 @@ from lbs.utils.lock import FileLock, LockError
 
 _MISSING_DEPENDENCY_ERROR: ModuleNotFoundError | None = None
 
+
+def _is_internal_module_error(exc: ModuleNotFoundError) -> bool:
+    """Returns True if the missing module belongs to the internal lbs package."""
+    name = (exc.name or "").strip()
+    return name == "lbs" or name.startswith("lbs.")
+
+
 try:
     from lbs import Scheduler, clean_session_state
     from lbs.config import Config, ConfigError, load_config, resolve_status_path
 except ModuleNotFoundError as exc:
+    if _is_internal_module_error(exc):
+        raise
     _MISSING_DEPENDENCY_ERROR = exc
     Scheduler = None  # type: ignore[assignment]
     clean_session_state = None  # type: ignore[assignment]
@@ -300,7 +309,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
         for issue in find_missing_dependencies(
             ignored=resolve_ignored_dependencies(config),
         ):
-            print(format_dependency_warning(issue), file=sys.stderr)
+            print(format_dependency_issue(issue), file=sys.stderr)
         print("Configuration is valid.")
         sys.exit(0)
     except ConfigError as e:
@@ -511,6 +520,8 @@ def main() -> None:
     try:
         args.func(args)
     except ModuleNotFoundError as e:
+        if _is_internal_module_error(e):
+            raise
         missing_name = e.name or str(e)
         for line in format_startup_dependency_report(missing_name):
             print(line, file=sys.stderr)

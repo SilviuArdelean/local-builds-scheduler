@@ -17,6 +17,7 @@ from typing import Literal
 
 INSTALL_HINT = "Run 'python -m pip install -e .' to install missing dependencies."
 GENERIC_SOFT_IMPACT = "some features may be unavailable"
+MANDATORY_IMPACT = "required for LBS to run"
 
 _KNOWN_SOFT_IMPACTS: dict[str, str] = {
     "psutil": "CPU, RAM, and Disk I/O metrics will show as N/A",
@@ -163,12 +164,17 @@ def find_missing_dependencies(
         if norm in ignored_normalized:
             continue
         if not installed_check(pkg):
-            impact = _KNOWN_SOFT_IMPACTS.get(norm, GENERIC_SOFT_IMPACT)
+            if norm in _MANDATORY_DISTS:
+                severity: Literal["error", "warning"] = "error"
+                impact = MANDATORY_IMPACT
+            else:
+                severity = "warning"
+                impact = _KNOWN_SOFT_IMPACTS.get(norm, GENERIC_SOFT_IMPACT)
             issues.append(
                 DependencyIssue(
                     package=pkg,
                     normalized=norm,
-                    severity="warning",
+                    severity=severity,
                     impact=impact,
                 )
             )
@@ -190,6 +196,13 @@ def format_missing_required_error(module_or_package: str) -> str:
     return f"Error: Missing required dependency '{dist_name}'. {INSTALL_HINT}"
 
 
+def format_dependency_issue(issue: DependencyIssue) -> str:
+    """Formats a DependencyIssue according to its severity."""
+    if issue.severity == "error":
+        return format_missing_required_error(issue.package)
+    return format_dependency_warning(issue)
+
+
 def format_startup_dependency_report(
     trigger_module: str,
     pyproject_path: Path | None = None,
@@ -201,8 +214,8 @@ def format_startup_dependency_report(
     """Formats fatal errors and any additional soft-dependency warnings on startup.
 
     Always reports the missing module that triggered startup failure as a fatal
-    error, plus any other missing mandatory dependencies as errors and any
-    missing soft dependencies as warnings so the user sees the full picture.
+    error, plus any other error-severity dependencies as errors and any
+    warning-severity dependencies as warnings so the user sees the full picture.
     """
     root_name = trigger_module.strip().split(".", 1)[0]
     trigger_pkg = _IMPORT_TO_DIST_MAP.get(root_name.lower(), root_name)
@@ -220,7 +233,7 @@ def format_startup_dependency_report(
     seen_errors: set[str] = set()
 
     for issue in issues:
-        if issue.normalized == trigger_norm or issue.normalized in _MANDATORY_DISTS:
+        if issue.normalized == trigger_norm or issue.severity == "error":
             if issue.normalized not in seen_errors:
                 seen_errors.add(issue.normalized)
                 error_lines.append(format_missing_required_error(issue.package))
