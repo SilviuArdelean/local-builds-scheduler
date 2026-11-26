@@ -20,7 +20,7 @@ from lbs import __version__
 from lbs.utils.deps import (
     find_missing_dependencies,
     format_dependency_warning,
-    format_missing_required_error,
+    format_startup_dependency_report,
     resolve_ignored_dependencies,
 )
 from lbs.utils.lock import FileLock, LockError
@@ -505,13 +505,15 @@ def main() -> None:
         missing_name = (
             _MISSING_DEPENDENCY_ERROR.name or str(_MISSING_DEPENDENCY_ERROR)
         )
-        print(format_missing_required_error(missing_name), file=sys.stderr)
+        for line in format_startup_dependency_report(missing_name):
+            print(line, file=sys.stderr)
         sys.exit(2)
     try:
         args.func(args)
     except ModuleNotFoundError as e:
         missing_name = e.name or str(e)
-        print(format_missing_required_error(missing_name), file=sys.stderr)
+        for line in format_startup_dependency_report(missing_name):
+            print(line, file=sys.stderr)
         sys.exit(2)
     except KeyboardInterrupt:
         sys.exit(130)

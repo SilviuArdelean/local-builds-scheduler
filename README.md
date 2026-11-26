@@ -76,6 +76,18 @@ The demo covers multi-phase execution, Siso-style progress, counters, live
 compiler output, responsive layouts, and terminal resizing. See
 [`demos/dashboard_demo/`](demos/dashboard_demo/) for details.
 
+### Missing Dependencies Demo
+
+Preview missing soft (`psutil`) and mandatory (`pyyaml`, `rich`) dependency
+warnings and errors without modifying your virtual environment:
+
+```powershell
+python demos\missing_deps_demo\run_demo.py all
+python demos\missing_deps_demo\run_demo.py psutil
+```
+
+See [`demos/missing_deps_demo/`](demos/missing_deps_demo/) for all scenarios.
+
 ---
 
 ## Configuration

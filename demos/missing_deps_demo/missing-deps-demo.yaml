@@ -1,0 +1,20 @@
+# Demo config for previewing missing-dependency warnings without modifying .venv.
+# Run from the repository root:
+#   python demos\missing_deps_demo\run_demo.py psutil
+settings:
+  log_dir: demos/missing_deps_demo/logs
+  stop_on_failure: false
+  system_resources:
+    enabled: true
+    cpu_interval_seconds: 1
+    memory_interval_seconds: 5
+    disk_io_interval_seconds: 2
+
+jobs:
+  - name: demo-build
+    cwd: demos/missing_deps_demo
+    phases:
+      sync:
+        - python -c "import time; print('Syncing demo repository...'); time.sleep(2)"
+      build:
+        - python -c "import time; [print(f'[{i}/5] Compiling target_{i}.o', flush=True) or time.sleep(0.8) for i in range(1, 6)]"

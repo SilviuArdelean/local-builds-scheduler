@@ -26,6 +26,8 @@ _IMPORT_TO_DIST_MAP: dict[str, str] = {
     "yaml": "pyyaml",
 }
 
+_MANDATORY_DISTS: frozenset[str] = frozenset({"pyyaml", "rich"})
+
 _PEP503_RE = re.compile(r"[-_.]+")
 _REQ_NAME_RE = re.compile(
     r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
@@ -186,6 +188,49 @@ def format_missing_required_error(module_or_package: str) -> str:
     root_name = module_or_package.strip().split(".", 1)[0]
     dist_name = _IMPORT_TO_DIST_MAP.get(root_name.lower(), root_name)
     return f"Error: Missing required dependency '{dist_name}'. {INSTALL_HINT}"
+
+
+def format_startup_dependency_report(
+    trigger_module: str,
+    pyproject_path: Path | None = None,
+    dist_name: str = "lbs",
+    *,
+    requires_fn: Callable[[str], list[str] | None] | None = None,
+    is_installed_fn: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """Formats fatal errors and any additional soft-dependency warnings on startup.
+
+    Always reports the missing module that triggered startup failure as a fatal
+    error, plus any other missing mandatory dependencies as errors and any
+    missing soft dependencies as warnings so the user sees the full picture.
+    """
+    root_name = trigger_module.strip().split(".", 1)[0]
+    trigger_pkg = _IMPORT_TO_DIST_MAP.get(root_name.lower(), root_name)
+    trigger_norm = normalize_dist_name(trigger_pkg)
+
+    issues = find_missing_dependencies(
+        pyproject_path=pyproject_path,
+        dist_name=dist_name,
+        requires_fn=requires_fn,
+        is_installed_fn=is_installed_fn,
+    )
+
+    error_lines: list[str] = []
+    warning_lines: list[str] = []
+    seen_errors: set[str] = set()
+
+    for issue in issues:
+        if issue.normalized == trigger_norm or issue.normalized in _MANDATORY_DISTS:
+            if issue.normalized not in seen_errors:
+                seen_errors.add(issue.normalized)
+                error_lines.append(format_missing_required_error(issue.package))
+        else:
+            warning_lines.append(format_dependency_warning(issue))
+
+    if trigger_norm not in seen_errors:
+        error_lines.insert(0, format_missing_required_error(trigger_pkg))
+
+    return error_lines + warning_lines
 
 
 def resolve_ignored_dependencies(config: object | None) -> set[str]:

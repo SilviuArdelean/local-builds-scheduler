@@ -609,3 +609,66 @@ def test_cli_status_json_stdout_unaffected_when_soft_dependency_missing(
     parsed = json.loads(captured.out)
     assert parsed["jobs"]["alpha"]["status"] == "SUCCESS"
     assert captured.err == ""
+
+
+def test_format_startup_dependency_report_mixed_fatal_and_warning(tmp_path) -> None:
+    from lbs.utils.deps import format_startup_dependency_report
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        """
+[project]
+name = "lbs"
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "psutil>=5.9",
+]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    lines = format_startup_dependency_report(
+        "yaml",
+        pyproject_path=pyproject,
+        is_installed_fn=lambda name: normalize_dist_name(name) == "rich",
+    )
+    assert lines == [
+        f"Error: Missing required dependency 'pyyaml'. {INSTALL_HINT}",
+        (
+            "[WARNING] Missing dependency 'psutil': "
+            f"CPU, RAM, and Disk I/O metrics will show as N/A. {INSTALL_HINT}"
+        ),
+    ]
+
+
+def test_format_startup_dependency_report_all_missing(tmp_path) -> None:
+    from lbs.utils.deps import format_startup_dependency_report
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        """
+[project]
+name = "lbs"
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "psutil>=5.9",
+]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    lines = format_startup_dependency_report(
+        "yaml",
+        pyproject_path=pyproject,
+        is_installed_fn=lambda name: False,
+    )
+    assert lines == [
+        f"Error: Missing required dependency 'pyyaml'. {INSTALL_HINT}",
+        f"Error: Missing required dependency 'rich'. {INSTALL_HINT}",
+        (
+            "[WARNING] Missing dependency 'psutil': "
+            f"CPU, RAM, and Disk I/O metrics will show as N/A. {INSTALL_HINT}"
+        ),
+    ]
