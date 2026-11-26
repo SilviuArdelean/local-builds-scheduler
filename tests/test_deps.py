@@ -8,7 +8,10 @@ Unit tests for lbs.utils.deps (generic runtime dependency detection).
 from __future__ import annotations
 
 import importlib.metadata
+import subprocess
+import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -235,3 +238,166 @@ def test_resolve_ignored_dependencies() -> None:
     assert resolve_ignored_dependencies(cfg_disabled) == {"psutil"}
     assert resolve_ignored_dependencies(cfg_enabled) == set()
     assert resolve_ignored_dependencies(None) == set()
+
+
+def test_lbs_package_lazy_exports() -> None:
+    import lbs
+
+    assert lbs.__version__
+    assert lbs.Scheduler is not None
+    assert callable(lbs.run_scheduler)
+    assert callable(lbs.clean_session_state)
+    assert callable(lbs.format_session_status)
+    assert lbs.JobExecutor is not None
+    assert lbs.CommandResult is not None
+
+    with pytest.raises(AttributeError):
+        _ = lbs.nonexistent_symbol
+
+
+@pytest.mark.parametrize(
+    ("blocked_module", "expected_dist"),
+    [
+        ("yaml", "pyyaml"),
+        ("rich", "rich"),
+    ],
+)
+def test_cli_missing_hard_dependency_exits_cleanly_without_traceback(
+    blocked_module: str,
+    expected_dist: str,
+) -> None:
+    """When a mandatory dependency is missing, lbs --version still works and
+    subcommands exit with code 2 and a clean install hint (no traceback).
+    """
+    blocker = (
+        "import sys\n"
+        f"mod = {blocked_module!r}\n"
+        "class _Blocker:\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name == mod or name.startswith(mod + '.'):\n"
+        "            raise ModuleNotFoundError(f'No module named {name!r}', name=mod)\n"
+        "sys.meta_path.insert(0, _Blocker())\n"
+        "from lbs.cli import main\n"
+        "main()\n"
+    )
+
+    # --version must still succeed without third-party imports
+    ver_proc = subprocess.run(
+        [sys.executable, "-c", blocker, "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ver_proc.returncode == 0
+    assert ver_proc.stdout.strip().startswith("lbs ")
+
+    # Subcommand must fail cleanly with exit code 2 and no traceback
+    val_proc = subprocess.run(
+        [sys.executable, "-c", blocker, "validate", "nonexistent.yaml"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert val_proc.returncode == 2
+    assert "Traceback" not in val_proc.stderr
+    assert f"Error: Missing required dependency '{expected_dist}'." in val_proc.stderr
+    assert INSTALL_HINT in val_proc.stderr
+
+
+def test_cli_validate_warns_on_missing_soft_dependency_to_stderr(
+    tmp_path, capsys
+) -> None:
+    from lbs.cli import cmd_validate
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        (
+            "jobs:\n"
+            "  - name: j1\n"
+            f"    cwd: {str(workspace)!r}\n"
+            "    commands: ['echo hi']\n"
+        ),
+        encoding="utf-8",
+    )
+
+    missing_psutil = [
+        DependencyIssue(
+            package="psutil",
+            normalized="psutil",
+            severity="warning",
+            impact="CPU, RAM, and Disk I/O metrics will show as N/A",
+        )
+    ]
+
+    args = SimpleNamespace(config=str(cfg), notifications_config=None)
+    with patch("lbs.cli.find_missing_dependencies", return_value=missing_psutil):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_validate(args)
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "Configuration is valid."
+    assert "[WARNING] Missing dependency 'psutil'" in captured.err
+    assert INSTALL_HINT in captured.err
+
+
+def test_cli_validate_suppresses_psutil_warning_when_monitoring_disabled(
+    tmp_path, capsys
+) -> None:
+    from lbs.cli import cmd_validate
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        (
+            "settings:\n"
+            "  system_resources:\n"
+            "    enabled: false\n"
+            "jobs:\n"
+            "  - name: j1\n"
+            f"    cwd: {str(workspace)!r}\n"
+            "    commands: ['echo hi']\n"
+        ),
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(config=str(cfg), notifications_config=None)
+    with patch(
+        "lbs.utils.deps.is_distribution_installed",
+        side_effect=lambda name: normalize_dist_name(name) != "psutil",
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_validate(args)
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "Configuration is valid."
+    assert captured.err == ""
+
+
+def test_cli_list_stdout_unaffected_when_soft_dependency_missing(
+    tmp_path, capsys
+) -> None:
+    from lbs.cli import cmd_list
+
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        "jobs:\n  - name: alpha\n    cwd: '.'\n    commands: ['echo 1']\n",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(config=str(cfg))
+    with patch(
+        "lbs.utils.deps.is_distribution_installed",
+        side_effect=lambda name: normalize_dist_name(name) != "psutil",
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_list(args)
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "alpha"
+    assert captured.err == ""
