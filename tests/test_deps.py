@@ -8,6 +8,9 @@ Unit tests for lbs.utils.deps (generic runtime dependency detection).
 from __future__ import annotations
 
 import importlib.metadata
+import io
+import json
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -400,4 +403,209 @@ def test_cli_list_stdout_unaffected_when_soft_dependency_missing(
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == "alpha"
+    assert captured.err == ""
+
+
+def _make_simple_config(
+    tmp_path,
+    *,
+    quiet: bool = False,
+    resources_enabled: bool = True,
+):
+    from lbs.config import Config, Job, Settings, SystemResourcesConfig
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)
+    log_dir = tmp_path / "logs"
+    return Config(
+        settings=Settings(
+            log_dir=str(log_dir),
+            verbose=not quiet,
+            quiet=quiet,
+            system_resources=SystemResourcesConfig(enabled=resources_enabled),
+        ),
+        jobs=[
+            Job(
+                name="j1",
+                cwd=str(workspace),
+                commands=["echo hello"],
+            )
+        ],
+    )
+
+
+def test_runner_dry_run_warns_on_missing_soft_dependency_to_stderr(
+    tmp_path, capsys
+) -> None:
+    from lbs.runner import Scheduler
+
+    cfg = _make_simple_config(tmp_path)
+    missing_psutil = [
+        DependencyIssue(
+            package="psutil",
+            normalized="psutil",
+            severity="warning",
+            impact="CPU, RAM, and Disk I/O metrics will show as N/A",
+        )
+    ]
+
+    with patch("lbs.runner.find_missing_dependencies", return_value=missing_psutil):
+        ok = Scheduler.run(cfg, dry_run=True)
+
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "Dry-Run Execution Plan" in captured.out
+    assert "[WARNING] Missing dependency 'psutil'" not in captured.out
+    assert "[WARNING] Missing dependency 'psutil'" in captured.err
+    assert INSTALL_HINT in captured.err
+
+
+def test_runner_non_split_logs_and_prints_warning_to_stderr(tmp_path, capsys) -> None:
+    from lbs.runner import Scheduler
+
+    cfg = _make_simple_config(tmp_path, quiet=True)
+    missing_psutil = [
+        DependencyIssue(
+            package="psutil",
+            normalized="psutil",
+            severity="warning",
+            impact="CPU, RAM, and Disk I/O metrics will show as N/A",
+        )
+    ]
+
+    with (
+        patch("lbs.runner.find_missing_dependencies", return_value=missing_psutil),
+        patch("lbs.runner._execute_job_attempt", return_value=True),
+    ):
+        ok = Scheduler.run(cfg)
+
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "[WARNING] Missing dependency 'psutil'" in captured.err
+
+    session_logs = list((tmp_path / "logs").glob("*_session.log"))
+    assert len(session_logs) == 1
+    log_content = session_logs[0].read_text(encoding="utf-8")
+    assert "[WARNING] Missing dependency 'psutil'" in log_content
+
+
+def test_runner_split_screen_writes_warning_after_screen_clear(
+    tmp_path, monkeypatch
+) -> None:
+    from lbs.runner import Scheduler, _QueueProgressReporter
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    cfg = _make_simple_config(tmp_path, quiet=False)
+    missing_psutil = [
+        DependencyIssue(
+            package="psutil",
+            normalized="psutil",
+            severity="warning",
+            impact="CPU, RAM, and Disk I/O metrics will show as N/A",
+        )
+    ]
+
+    fake_stream = io.StringIO()
+    real_reporter_cls = _QueueProgressReporter
+
+    def make_tty_reporter(*args, **kwargs):
+        kwargs["stream"] = fake_stream
+        kwargs["force_tty"] = True
+        kwargs["enable_ticker"] = False
+        return real_reporter_cls(*args, **kwargs)
+
+    with (
+        patch("lbs.runner.find_missing_dependencies", return_value=missing_psutil),
+        patch("lbs.runner._QueueProgressReporter", side_effect=make_tty_reporter),
+        patch("lbs.runner._execute_job_attempt", return_value=True),
+        patch(
+            "lbs.ui.terminal.shutil.get_terminal_size",
+            return_value=os.terminal_size((120, 30)),
+        ),
+    ):
+        ok = Scheduler.run(cfg)
+
+    assert ok is True
+    stream_text = fake_stream.getvalue()
+    clear_idx = stream_text.index("\033[2J\033[3J")
+    warn_idx = stream_text.index("[WARNING] Missing dependency 'psutil'")
+    assert warn_idx > clear_idx
+
+    session_logs = list((tmp_path / "logs").glob("*_session.log"))
+    assert len(session_logs) == 1
+    assert "[WARNING] Missing dependency 'psutil'" in session_logs[0].read_text(
+        encoding="utf-8"
+    )
+
+
+def test_runner_suppresses_psutil_warning_when_monitoring_disabled(
+    tmp_path, capsys
+) -> None:
+    from lbs.runner import Scheduler
+
+    cfg = _make_simple_config(tmp_path, quiet=True, resources_enabled=False)
+
+    with (
+        patch(
+            "lbs.utils.deps.is_distribution_installed",
+            side_effect=lambda name: normalize_dist_name(name) != "psutil",
+        ),
+        patch("lbs.runner._execute_job_attempt", return_value=True),
+    ):
+        ok = Scheduler.run(cfg)
+
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "[WARNING] Missing dependency 'psutil'" not in captured.err
+    session_logs = list((tmp_path / "logs").glob("*_session.log"))
+    assert len(session_logs) == 1
+    assert "[WARNING] Missing dependency 'psutil'" not in session_logs[0].read_text(
+        encoding="utf-8"
+    )
+
+
+def test_cli_status_json_stdout_unaffected_when_soft_dependency_missing(
+    tmp_path, capsys
+) -> None:
+    from lbs.cli import cmd_status
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        (
+            "settings:\n"
+            f"  log_dir: {str(log_dir)!r}\n"
+            "jobs:\n"
+            "  - name: alpha\n"
+            "    cwd: '.'\n"
+            "    commands: ['echo 1']\n"
+        ),
+        encoding="utf-8",
+    )
+    status_file = log_dir / "lbs_status_cfg.json"
+    status_file.write_text(
+        json.dumps(
+            {
+                "config_file": str(cfg),
+                "session_date": "2026-11-26",
+                "last_updated": "2026-11-26T12:00:00",
+                "jobs": {"alpha": {"status": "SUCCESS", "duration": 1.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(config=str(cfg), json=True)
+    with patch(
+        "lbs.utils.deps.is_distribution_installed",
+        side_effect=lambda name: normalize_dist_name(name) != "psutil",
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_status(args)
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["jobs"]["alpha"]["status"] == "SUCCESS"
     assert captured.err == ""
