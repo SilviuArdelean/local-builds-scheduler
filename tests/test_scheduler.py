@@ -179,8 +179,8 @@ def test_cli_filtering_invalid_name(tmp_path):
     assert "Error: Job filter contains invalid job names: bad-name-xyz" in result.stderr
 
 
-def test_cli_run_value_error_without_job(tmp_path):
-    """Verify that a ValueError raised during run without --job is not masked by cmd_run."""
+def test_cli_run_value_error_without_job(tmp_path, capsys):
+    """Verify that a non-filter ValueError in cmd_run exits cleanly as an internal error (exit 1)."""
     from lbs.cli import cmd_run
     import argparse
     from unittest.mock import patch
@@ -194,9 +194,12 @@ def test_cli_run_value_error_without_job(tmp_path):
          patch("lbs.cli.Scheduler.run", side_effect=ValueError("Programming error")):
         mock_load.return_value = None
 
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(SystemExit) as exc:
             cmd_run(args)
-        assert "Programming error" in str(exc.value)
+        assert exc.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "[LBS] Internal error: Programming error" in captured.err
 
 
 def test_scheduler_phased_execution(tmp_path):
@@ -407,5 +410,98 @@ def test_scheduler_phase_failure_skips_remaining_phases_of_same_job_only(tmp_pat
     assert "Starting job: job-alpha (phase: build)" not in content
     assert "Starting job: job-beta (phase: sync)" in content
     assert "Starting job: job-beta (phase: build)" in content
+
+
+def test_scheduler_job_log_enospc_marks_failed_aborts_rest_and_notifies(tmp_path, capsys):
+    """An OSError opening a job log marks the job FAILED (not RUNNING), stops the queue, and dispatches notification."""
+    import builtins
+    import errno
+    import json
+    from unittest.mock import patch
+    from lbs.runner import SessionIOError
+
+    log_dir = tmp_path / "logs"
+    settings = Settings(stop_on_failure=False, log_dir=str(log_dir))
+    marker_b = tmp_path / "job_b_ran.txt"
+
+    jobs = [
+        Job(
+            name="job-A",
+            cwd=str(tmp_path),
+            commands=[f'"{sys.executable}" -c "print(1)"'],
+            retries=2,
+            retry_delay_seconds=0,
+        ),
+        Job(
+            name="job-B",
+            cwd=str(tmp_path),
+            commands=[
+                f'"{sys.executable}" -c "import pathlib; pathlib.Path(r\'{marker_b}\').write_text(\'ran\')"'
+            ],
+        ),
+    ]
+    config = Config(settings=settings, jobs=jobs)
+
+    real_open = builtins.open
+    job_log_open_attempts = 0
+
+    def failing_open(file, *args, **kwargs):
+        nonlocal job_log_open_attempts
+        if str(file).endswith("_job-A.log"):
+            job_log_open_attempts += 1
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(file, *args, **kwargs)
+
+    with patch("builtins.open", side_effect=failing_open), \
+         patch("lbs.utils.notifier.dispatch_notifications") as mock_notify:
+        with pytest.raises(SessionIOError):
+            Scheduler.run(config)
+
+    # Should not retry on fatal I/O error and should not run subsequent jobs
+    assert job_log_open_attempts == 1
+    assert not marker_b.exists()
+
+    # Status file should mark job-A FAILED (not RUNNING) and job-B ABORTED
+    status_path = log_dir / "lbs_status.json"
+    saved = json.loads(status_path.read_text(encoding="utf-8"))
+    assert saved["jobs"]["job-A"]["status"] == "FAILED"
+    assert saved["jobs"]["job-B"]["status"] == "ABORTED"
+
+    # Summary printed and failure notification dispatched
+    captured = capsys.readouterr()
+    assert "LBS Session Summary" in captured.out
+    assert mock_notify.call_count == 1
+    notify_kwargs = mock_notify.call_args.kwargs
+    assert notify_kwargs["success"] is False
+    assert notify_kwargs["failed_count"] == 1
+
+
+def test_reconcile_stale_running_status_warns_on_write_failure(tmp_path, capsys):
+    """Verify _reconcile_stale_running_status warns on stderr when persisting the reconciled status fails."""
+    import errno
+    from unittest.mock import patch
+    from lbs.runner import _reconcile_stale_running_status
+
+    target_path = tmp_path / "lbs_status.json"
+    status_data = {
+        "session_date": "2026-11-27",
+        "jobs": {
+            "job-A": {
+                "status": "RUNNING",
+                "build_status": "RUNNING",
+                "commands": [{"phase": "default", "command": "echo 1", "status": "RUNNING"}],
+            }
+        },
+    }
+
+    with patch("lbs.runner.tempfile.mkstemp", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+        reconciled = _reconcile_stale_running_status(target_path, status_data, status_data["jobs"])
+
+    assert reconciled is True
+    assert status_data["jobs"]["job-A"]["status"] == "FAILED"
+    captured = capsys.readouterr()
+    assert "Warning: Failed to persist reconciled status" in captured.err
+    assert "No space left on device" in captured.err
+
 
 

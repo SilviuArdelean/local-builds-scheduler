@@ -1497,3 +1497,87 @@ def test_cli_clean_status_list_and_run_with_missing_cwd(tmp_path):
     assert clean_res2.returncode == 0
     assert f"Cleared saved session state for {config_file}." in clean_res2.stdout
 
+
+@patch("lbs.cli.subprocess.run")
+def test_cli_run_shutdown_skipped_on_enospc_error(mock_sub_run, tmp_path, capsys):
+    """An OSError(ENOSPC) escaping Scheduler.run must not trigger shutdown and must print a clear skip message."""
+    import argparse
+    import errno
+    from unittest.mock import patch as local_patch
+    from lbs.cli import cmd_run
+
+    config_file = tmp_path / "valid.yaml"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    log_dir = tmp_path / "logs"
+
+    yaml_content = f"""
+    settings:
+      log_dir: "{log_dir.as_posix()}"
+    jobs:
+      - name: job-1
+        cwd: "{workspace_dir.as_posix()}"
+        commands: ["echo 1"]
+    """
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_file),
+        quiet=False,
+        job=None,
+        dry_run=False,
+        resume=None,
+        notifications_config=None,
+        notifications=False,
+        shutdown=True,
+    )
+
+    with local_patch(
+        "lbs.cli.Scheduler.run",
+        side_effect=OSError(errno.ENOSPC, "No space left on device"),
+    ), local_patch("sys.exit") as mock_exit:
+        cmd_run(args)
+        assert mock_exit.call_count == 1
+        assert mock_exit.call_args[0][0] == 1
+
+    assert mock_sub_run.call_count == 0
+    captured = capsys.readouterr()
+    assert "[LBS] Internal error:" in captured.err
+    assert "No space left on device" in captured.err
+    assert "[LBS] Shutdown skipped: the session ended with an internal error." in captured.err
+
+
+def test_cli_shutdown_guard_reports_interrupted_jobs_separately(tmp_path, capsys):
+    """_should_trigger_shutdown reports RUNNING/INTERRUPTED jobs with --resume latest guidance."""
+    import json
+    from lbs.cli import _should_trigger_shutdown
+    from lbs.config import Config, Job, Settings, resolve_status_path
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    config_file = tmp_path / "cfg.yaml"
+    config = Config(
+        settings=Settings(log_dir=str(log_dir)),
+        jobs=[
+            Job(name="job-1", cwd=str(tmp_path), commands=["echo 1"]),
+            Job(name="job-2", cwd=str(tmp_path), commands=["echo 2"]),
+        ],
+    )
+    status_path = resolve_status_path(str(log_dir), str(config_file))
+
+    for stale_status in ("RUNNING", "INTERRUPTED"):
+        status_path.write_text(
+            json.dumps({
+                "jobs": {
+                    "job-1": {"status": stale_status, "commands": []},
+                    "job-2": {"status": "PENDING", "commands": []},
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert _should_trigger_shutdown(config, str(config_file)) is False
+        captured = capsys.readouterr()
+        assert "1 job was interrupted and needs '--resume latest'." in captured.err
+        assert "run without job filters" not in captured.err
+
+
