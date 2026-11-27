@@ -133,15 +133,17 @@ def trigger_os_shutdown(
             _cancel_os_shutdown(abort_cmd)
 
 
-def _get_enabled_jobs_completion_counts(
+def _get_enabled_jobs_status_breakdown(
     config: Config,
     config_path: str,
     allow_aborted_on_failure: bool = True,
-) -> tuple[int, int, int] | None:
-    """Returns (passed_count, failed_count, unfinished_count) for all enabled jobs.
+) -> tuple[int, int, int, int] | None:
+    """Returns (passed, failed, interrupted, unexecuted) counts for enabled jobs.
 
     An enabled job is considered finished (attempted) if its persisted status is
     SUCCESS (with no remaining PENDING commands from phase filtering) or FAILED.
+    Jobs in RUNNING or INTERRUPTED state are counted as interrupted so callers
+    can report them separately from unexecuted/filtered jobs.
     When stop_on_failure is enabled and allow_aborted_on_failure is True, jobs
     marked ABORTED or PARTIAL due to an earlier job's failure in the queue are
     not counted as unexecuted filter omissions.
@@ -157,13 +159,14 @@ def _get_enabled_jobs_completion_counts(
     passed = 0
     failed = 0
     aborted_by_failure = 0
-    unfinished = 0
+    interrupted = 0
+    unexecuted = 0
     for job in config.jobs:
         if not job.build_it:
             continue
         info = saved_jobs.get(job.name)
         if not isinstance(info, dict):
-            unfinished += 1
+            unexecuted += 1
             continue
         status = info.get("status")
         cmds = info.get("commands", [])
@@ -178,14 +181,36 @@ def _get_enabled_jobs_completion_counts(
             failed += 1
         elif status in ("ABORTED", "PARTIAL"):
             aborted_by_failure += 1
+        elif status in ("RUNNING", "INTERRUPTED"):
+            interrupted += 1
         else:
-            unfinished += 1
+            unexecuted += 1
 
     if aborted_by_failure > 0:
         if not (allow_aborted_on_failure and config.settings.stop_on_failure and failed > 0):
-            unfinished += aborted_by_failure
+            unexecuted += aborted_by_failure
 
-    return passed, failed, unfinished
+    return passed, failed, interrupted, unexecuted
+
+
+def _get_enabled_jobs_completion_counts(
+    config: Config,
+    config_path: str,
+    allow_aborted_on_failure: bool = True,
+) -> tuple[int, int, int] | None:
+    """Returns (passed_count, failed_count, unfinished_count) for all enabled jobs.
+
+    Returns None if the status file cannot be read, so callers can stay safe.
+    """
+    breakdown = _get_enabled_jobs_status_breakdown(
+        config,
+        config_path,
+        allow_aborted_on_failure=allow_aborted_on_failure,
+    )
+    if breakdown is None:
+        return None
+    passed, failed, interrupted, unexecuted = breakdown
+    return passed, failed, interrupted + unexecuted
 
 
 def _count_unfinished_enabled_jobs(
@@ -213,23 +238,34 @@ def _should_trigger_shutdown(
     allow_aborted_on_failure: bool = True,
 ) -> bool:
     """Returns True only if all enabled jobs were attempted (or halted by stop_on_failure); otherwise warns on stderr."""
-    unfinished = _count_unfinished_enabled_jobs(
+    breakdown = _get_enabled_jobs_status_breakdown(
         config,
         config_path,
         allow_aborted_on_failure=allow_aborted_on_failure,
     )
-    if unfinished is None:
+    if breakdown is None:
         print(
             "[WARNING] System shutdown cancelled: could not verify the "
             "status of all jobs in the configuration.",
             file=sys.stderr,
         )
         return False
-    if unfinished > 0:
-        noun = "job" if unfinished == 1 else "jobs"
-        verb = "remains" if unfinished == 1 else "remain"
+    _, _, interrupted, unexecuted = breakdown
+    if interrupted > 0:
+        noun = "job" if interrupted == 1 else "jobs"
+        verb = "was" if interrupted == 1 else "were"
+        need_verb = "needs" if interrupted == 1 else "need"
         print(
-            f"[WARNING] System shutdown cancelled: {unfinished} {noun} in the "
+            f"[WARNING] System shutdown cancelled: {interrupted} {noun} {verb} "
+            f"interrupted and {need_verb} '--resume latest'.",
+            file=sys.stderr,
+        )
+        return False
+    if unexecuted > 0:
+        noun = "job" if unexecuted == 1 else "jobs"
+        verb = "remains" if unexecuted == 1 else "remain"
+        print(
+            f"[WARNING] System shutdown cancelled: {unexecuted} {noun} in the "
             f"configuration {verb} unexecuted or skipped.\n"
             "To power off only after all jobs finish, run without job filters.",
             file=sys.stderr,
@@ -291,12 +327,26 @@ def cmd_run(args: argparse.Namespace) -> None:
                 or getattr(args, "fresh", False)):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
-        raise
+        print(f"[LBS] Internal error: {e}", file=sys.stderr)
+        if getattr(args, "shutdown", False):
+            print(
+                "[LBS] Shutdown skipped: the session ended with an internal error.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
     except LockError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
     except KeyboardInterrupt:
         sys.exit(130)
+    except Exception as e:
+        print(f"[LBS] Internal error: {e}", file=sys.stderr)
+        if getattr(args, "shutdown", False):
+            print(
+                "[LBS] Shutdown skipped: the session ended with an internal error.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
 
 def cmd_validate(args: argparse.Namespace) -> None:

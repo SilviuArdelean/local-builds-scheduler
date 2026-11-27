@@ -52,6 +52,11 @@ from lbs.utils.lock import FileLock
 from lbs.utils.sanitizer import sanitize_console_output
 
 
+class SessionIOError(OSError):
+    """Raised when a fatal I/O error (such as ENOSPC) interrupts session execution."""
+    pass
+
+
 @dataclass
 class CommandTask:
     """Represents an individual command execution unit with its lifecycle status."""
@@ -358,21 +363,26 @@ def _reconcile_stale_running_status(
             if target_path.name != "lbs_status.json"
             else "lbs_status_default_reconcile_"
         )
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=str(target_path.parent),
-            prefix=temp_prefix,
-            suffix=".tmp",
-        )
+        temp_path: str | None = None
         try:
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=str(target_path.parent),
+                prefix=temp_prefix,
+                suffix=".tmp",
+            )
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 json.dump(status_data, f, indent=2)
             os.replace(temp_path, str(target_path))
-        except Exception:
-            if os.path.exists(temp_path):
+        except Exception as e:
+            if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
+            print(
+                f"Warning: Failed to persist reconciled status to '{target_path}': {e}",
+                file=sys.stderr,
+            )
 
     return stale_reconciled
 
@@ -1062,44 +1072,56 @@ def _execute_job_attempt(
             commands = job.commands
 
     job_success = True
-    with open(job_log_path, "a", encoding="utf-8") as job_log:
+    fd: int | None = None
+    temp_script_path: Path | None = None
+    progress_path: Path | None = None
+    monitor: _JobProgressMonitor | None = None
 
-        def log_to_job(msg: str) -> None:
-            now = datetime.datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-            job_log.write(f"[{timestamp}] {msg}\n")
-            job_log.flush()
+    def _safe_status_cb() -> None:
+        if on_status_change:
+            try:
+                on_status_change()
+            except OSError:
+                pass
 
-        phase_suffix = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
-        if attempt > 1:
-            log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
-            if progress_reporter is not None:
-                progress_reporter.set_attempt(attempt, total_attempts)
-        else:
-            log_to_job(f"Job '{job.name}'{phase_suffix} started")
-            log_to_job(f"CWD: {job.cwd}")
-            log_to_job(f"Environment overlays: {job.env}")
+    try:
+        with open(job_log_path, "a", encoding="utf-8") as job_log:
 
-        if verbose:
-            with progress_reporter.lock if progress_reporter is not None else nullcontext():
-                sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
-                sys.stdout.flush()
+            def log_to_job(msg: str) -> None:
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                job_log.write(f"[{timestamp}] {msg}\n")
+                job_log.flush()
 
-        is_win = sys.platform == "win32"
-        suffix = ".bat" if is_win else ".sh"
-        fd, temp_script_path_str = tempfile.mkstemp(suffix=suffix, prefix="lbs_job_")
-        temp_script_path = Path(temp_script_path_str)
+            phase_suffix = f" (phase '{phase_name}')" if phase_name and phase_name != "default" else ""
+            if attempt > 1:
+                log_to_job(f"--- Retry Attempt {attempt - 1} / {job.retries} ---")
+                if progress_reporter is not None:
+                    progress_reporter.set_attempt(attempt, total_attempts)
+            else:
+                log_to_job(f"Job '{job.name}'{phase_suffix} started")
+                log_to_job(f"CWD: {job.cwd}")
+                log_to_job(f"Environment overlays: {job.env}")
 
-        progress_path = None
-        if tasks:
-            prog_fd, prog_path_str = tempfile.mkstemp(prefix="lbs_prog_", suffix=".log")
-            os.close(prog_fd)
-            progress_path = Path(prog_path_str)
+            if verbose:
+                with progress_reporter.lock if progress_reporter is not None else nullcontext():
+                    sys.stdout.write(f"\n[LBS] Executing job '{job.name}'{phase_suffix} [CWD: {job.cwd}]\n")
+                    sys.stdout.flush()
 
-        monitor: _JobProgressMonitor | None = None
-        try:
+            is_win = sys.platform == "win32"
+            suffix = ".bat" if is_win else ".sh"
+            fd, temp_script_path_str = tempfile.mkstemp(suffix=suffix, prefix="lbs_job_")
+            temp_script_path = Path(temp_script_path_str)
+
+            if tasks:
+                prog_fd, prog_path_str = tempfile.mkstemp(prefix="lbs_prog_", suffix=".log")
+                os.close(prog_fd)
+                progress_path = Path(prog_path_str)
+
             script_content = _generate_job_script(commands, tasks, progress_path, is_win)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            script_fd = fd
+            fd = None
+            with os.fdopen(script_fd, "w", encoding="utf-8") as f:
                 f.write(script_content)
 
             if tasks and progress_path:
@@ -1129,6 +1151,18 @@ def _execute_job_attempt(
             if monitor:
                 monitor.stop_and_drain()
 
+            if result.is_io_error:
+                if tasks:
+                    _reconcile_attempt_failure(
+                        tasks,
+                        result.exit_code,
+                        monitor.task_start_times if monitor else {},
+                        _safe_status_cb,
+                    )
+                raise SessionIOError(
+                    f"I/O error during job '{job.name}': {result.error_message}"
+                )
+
             if not result.success:
                 if tasks and monitor:
                     _reconcile_attempt_failure(tasks, result.exit_code, monitor.task_start_times, on_status_change)
@@ -1144,18 +1178,35 @@ def _execute_job_attempt(
                 job_success = False
             else:
                 log_to_job("Command succeeded")
-        finally:
-            if monitor:
-                monitor.stop_and_drain()
+    except SessionIOError:
+        raise
+    except OSError as e:
+        if tasks:
+            _reconcile_attempt_failure(
+                tasks,
+                None,
+                monitor.task_start_times if monitor else {},
+                _safe_status_cb,
+            )
+        raise SessionIOError(f"I/O error during job '{job.name}': {e}") from e
+    finally:
+        if monitor:
+            monitor.stop_and_drain()
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_script_path:
             try:
                 temp_script_path.unlink()
             except OSError:
                 pass
-            if progress_path:
-                try:
-                    progress_path.unlink()
-                except OSError:
-                    pass
+        if progress_path:
+            try:
+                progress_path.unlink()
+            except OSError:
+                pass
 
     return job_success
 
@@ -2711,6 +2762,92 @@ class Scheduler:
                 )
                 raise
 
+            except Exception as exc:
+                progress_reporter.finish(False)
+                overall_success = False
+                if active_job is not None:
+                    job_failed[active_job.name] = True
+                    active_tasks = job_command_tasks.get(active_job.name, [])
+                    for t in active_tasks:
+                        if t.status == BuildStatus.RUNNING:
+                            t.status = BuildStatus.FAILED
+                            t.exit_code = None
+                    if not any(t.status == BuildStatus.FAILED for t in active_tasks):
+                        for t in active_tasks:
+                            if t.status != BuildStatus.DONE:
+                                t.status = BuildStatus.FAILED
+                                break
+                    job_summaries[active_job.name]["status"] = "FAILED"
+                    job_summaries[active_job.name]["build_status"] = BuildStatus.FAILED.value
+                    if active_job_start_time is not None:
+                        curr_dur = time.perf_counter() - active_job_start_time
+                        accumulated = job_durations.get(active_job.name, 0.0) or 0.0
+                        total_job_dur = accumulated + curr_dur
+                        job_durations[active_job.name] = total_job_dur
+                        job_summaries[active_job.name]["duration"] = round(total_job_dur, 2)
+
+                for rem_job, _ in execution_tasks:
+                    if job_summaries[rem_job.name]["status"] == "PENDING":
+                        _mark_job_not_run(
+                            job_summaries[rem_job.name],
+                            job_command_tasks.get(rem_job.name, []),
+                        )
+
+                try:
+                    _save_status(
+                        status_path,
+                        config_path,
+                        session_date,
+                        job_summaries,
+                        config_hash=current_config_hash,
+                    )
+                except OSError as save_err:
+                    print(
+                        f"Warning: Failed to save session status after crash: {save_err}",
+                        file=sys.stderr,
+                    )
+
+                try:
+                    log_to_session(f"--- Session crashed: {exc} ---")
+                except OSError:
+                    pass
+
+                elapsed_time = time.perf_counter() - session_start_time
+                (
+                    summary_text,
+                    duration_str,
+                    passed_count,
+                    failed_count,
+                    skipped_count,
+                ) = _build_summary_text(
+                    job_summaries=job_summaries,
+                    overall_success=False,
+                    elapsed_time=elapsed_time,
+                )
+                print(summary_text)
+
+                from lbs.utils.notifier import build_aborted_jobs_list, dispatch_notifications
+                aborted_jobs_list = build_aborted_jobs_list(job_summaries)
+                cfg_display = str(config_path) if config_path else "<config>"
+                resume_cmd = f"lbs run {cfg_display} --resume latest"
+                try:
+                    dispatch_notifications(
+                        settings=config.settings,
+                        success=False,
+                        passed_count=passed_count,
+                        failed_count=failed_count,
+                        skipped_count=skipped_count,
+                        duration_str=duration_str,
+                        job_summaries=job_summaries,
+                        interrupted=False,
+                        aborted_jobs=aborted_jobs_list,
+                        resume_cmd=resume_cmd,
+                    )
+                except Exception:
+                    pass
+
+                raise
+
             elapsed_time = time.perf_counter() - session_start_time
             progress_reporter.finish(overall_success)
             (
@@ -2728,10 +2865,15 @@ class Scheduler:
 
             print(summary_text)
 
-            with open(session_log_path, "a", encoding="utf-8") as f:
-                f.write(summary_text)
-
-            log_to_session(f"--- Session ended (status: {session_status}) ---")
+            try:
+                with open(session_log_path, "a", encoding="utf-8") as f:
+                    f.write(summary_text)
+                log_to_session(f"--- Session ended (status: {session_status}) ---")
+            except OSError as log_err:
+                print(
+                    f"Warning: Failed to write session summary to log: {log_err}",
+                    file=sys.stderr,
+                )
 
             # Dispatch notification callbacks
             aborted_jobs_list = None

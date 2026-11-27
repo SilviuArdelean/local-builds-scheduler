@@ -374,6 +374,51 @@ def test_executor_on_output_line_exception_does_not_break_execution(tmp_path, ca
     assert "[ERROR] Output line callback failed: parser bug" in capsys.readouterr().err
 
 
+def test_executor_enospc_mid_stream_terminates_child_and_returns_io_error(tmp_path):
+    """Verify mid-stream ENOSPC from log_file terminates the child process without double-faulting."""
+    import errno
+    import time
+
+    marker = tmp_path / "orphan_marker.txt"
+
+    class FullDiskLog:
+        def __init__(self):
+            self.writes = 0
+
+        def write(self, _text):
+            self.writes += 1
+            if self.writes >= 2:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return len(_text)
+
+        def flush(self):
+            if self.writes >= 2:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+    child_script = (
+        "import sys, time, pathlib; "
+        "print('line-1', flush=True); "
+        "print('line-2', flush=True); "
+        "time.sleep(2.0); "
+        f"pathlib.Path(r'{marker}').write_text('orphan')"
+    )
+    py_cmd = f'"{sys.executable}" -c "{child_script}"'
+
+    executor = JobExecutor(verbose=False)
+    result = executor.run_command(py_cmd, cwd=str(tmp_path), log_file=FullDiskLog())
+
+    assert result.success is False
+    assert result.is_io_error is True
+    assert result.error_message is not None
+    assert "Failed to write command log" in result.error_message
+    assert "No space left on device" in result.error_message
+
+    # Wait briefly to confirm the child was terminated and never writes the marker
+    time.sleep(0.5)
+    assert not marker.exists()
+
+
+
 
 
 

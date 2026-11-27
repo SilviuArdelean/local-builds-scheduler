@@ -69,6 +69,17 @@ def _format_timeout(timeout: float) -> str:
     return f"{timeout:.6f}".rstrip("0").rstrip(".")
 
 
+def _safe_write_log(log_file, text: str) -> None:
+    """Writes and flushes text to log_file without raising OSError."""
+    if log_file is None:
+        return
+    try:
+        log_file.write(text)
+        log_file.flush()
+    except OSError:
+        pass
+
+
 @dataclass
 class CommandResult:
     """Detailed result of a single command execution."""
@@ -79,6 +90,7 @@ class CommandResult:
     duration: float
     success: bool
     error_message: str | None = None
+    is_io_error: bool = False
 
 
 class JobExecutor:
@@ -154,7 +166,10 @@ class JobExecutor:
         exit_code = None
         success = False
         error_message = None
+        is_io_error = False
         process: subprocess.Popen | None = None
+        process_terminated = False
+        q: queue.Queue | None = None
 
         try:
             if not os.path.isdir(cwd):
@@ -252,9 +267,7 @@ class JobExecutor:
 
                     formatted_timeout = _format_timeout(timeout)
                     error_message = f"Command timed out after {formatted_timeout} seconds"
-                    if log_file:
-                        log_file.write(f"[ERROR] {error_message}\n")
-                        log_file.flush()
+                    _safe_write_log(log_file, f"[ERROR] {error_message}\n")
                     self._write_stderr_error(error_message)
                     exit_code = None
                     success = False
@@ -290,9 +303,7 @@ class JobExecutor:
                         process.wait()
                         formatted_timeout = _format_timeout(timeout)
                         error_message = f"Command timed out after {formatted_timeout} seconds"
-                        if log_file:
-                            log_file.write(f"[ERROR] {error_message}\n")
-                            log_file.flush()
+                        _safe_write_log(log_file, f"[ERROR] {error_message}\n")
                         self._write_stderr_error(error_message)
                         exit_code = None
                         success = False
@@ -304,6 +315,7 @@ class JobExecutor:
         except KeyboardInterrupt:
             if process is not None:
                 _terminate_process(process)
+                process_terminated = True
                 try:
                     process.wait(timeout=2.0)
                 except Exception:
@@ -315,24 +327,41 @@ class JobExecutor:
 
         except FileNotFoundError as e:
             error_message = str(e)
-            if log_file:
-                log_file.write(f"[ERROR] {error_message}\n")
-                log_file.flush()
+            _safe_write_log(log_file, f"[ERROR] {error_message}\n")
             self._write_stderr_error(error_message)
 
         except OSError as e:
-            error_message = f"Failed to launch shell command: {e}"
-            if log_file:
-                log_file.write(f"[ERROR] {error_message}\n")
-                log_file.flush()
+            if process is None:
+                error_message = f"Failed to launch shell command: {e}"
+            else:
+                error_message = f"Failed to write command log: {e}"
+                is_io_error = True
+            _safe_write_log(log_file, f"[ERROR] {error_message}\n")
             self._write_stderr_error(error_message)
 
         except Exception as e:
             error_message = f"Unexpected execution error: {e}"
-            if log_file:
-                log_file.write(f"[ERROR] {error_message}\n")
-                log_file.flush()
+            _safe_write_log(log_file, f"[ERROR] {error_message}\n")
             self._write_stderr_error(error_message)
+
+        finally:
+            if (
+                not process_terminated
+                and process is not None
+                and process.poll() is None
+            ):
+                _terminate_process(process)
+                try:
+                    process.wait(timeout=2.0)
+                except Exception:
+                    pass
+            if q is not None:
+                while True:
+                    try:
+                        if q.get_nowait() is None:
+                            break
+                    except queue.Empty:
+                        break
 
         t_end = time.perf_counter()
         end_time = datetime.datetime.now()
@@ -344,4 +373,5 @@ class JobExecutor:
                              end_time=end_time,
                              duration=duration,
                              success=success,
-                             error_message=error_message)
+                             error_message=error_message,
+                             is_io_error=is_io_error)
